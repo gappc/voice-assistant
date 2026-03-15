@@ -9,7 +9,6 @@ dependencies = [
     "sounddevice",
     "numpy",
     "evdev",
-    "pynput",
 ]
 
 [project.scripts]

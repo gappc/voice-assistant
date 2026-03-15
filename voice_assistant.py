@@ -140,13 +140,25 @@ class VoiceAssistant:
         except (OSError, Exception) as e:
             print(f"Device error or disconnected: {device.name} - {e}")
 
+    def ensure_ydotoold(self):
+        """Ensures ydotoold is running and sets the socket environment variable."""
+        os.environ["YDOTOOL_SOCKET"] = "/tmp/.ydotool_socket"
+        try:
+            # Check if ydotoold is running
+            subprocess.run(["pgrep", "ydotoold"], check=True, capture_output=True)
+        except subprocess.CalledProcessError:
+            print("Starting ydotoold...")
+            subprocess.Popen(["ydotoold"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            time.sleep(1)
+
     def run(self):
+        self.ensure_ydotoold()
         keyboards = self.find_keyboards()
         if not keyboards:
             print("No keyboard devices found! Check permissions or /dev/input permissions.")
             return
 
-        print(f"Assistant ready! Hold Right Alt to record.")
+        print(f"Assistant ready! Hold Right Alt to record (with beeps).")
         
         # Start the sound stream
         with sd.InputStream(samplerate=SAMPLERATE, channels=CHANNELS, callback=self.record_callback):
@@ -164,6 +176,9 @@ class VoiceAssistant:
             except KeyboardInterrupt:
                 print("\nExiting...")
 
-if __name__ == "__main__":
+def main():
     assistant = VoiceAssistant()
     assistant.run()
+
+if __name__ == "__main__":
+    main()
