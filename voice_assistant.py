@@ -17,6 +17,7 @@ COMPUTE_TYPE = "int8"
 CHANNELS = 1
 SAMPLERATE = 16000
 TRIGGER_KEY_CODE = ecodes.KEY_RIGHTALT  # Scan code 100
+KEYBOARD_LAYOUT = "de" # Set to "de" for German, "us" for US
 
 class VoiceAssistant:
     def __init__(self):
@@ -28,8 +29,9 @@ class VoiceAssistant:
         self.worker_thread = threading.Thread(target=self._transcription_worker, daemon=True)
         self.worker_thread.start()
         
-        self.key_pressed = False
-        self.lock = threading.Lock() # Prevent race conditions from multiple devices
+        self.lock = threading.Lock()
+        # Track active recording to prevent duplicate starts from multiple devices
+        self.active_recording_device = None 
 
     def record_callback(self, indata, frames, time, status):
         if status:
@@ -37,17 +39,19 @@ class VoiceAssistant:
         if self.is_recording:
             self.audio_data.append(indata.copy())
 
-    def start_recording(self):
+    def start_recording(self, device_path):
         with self.lock:
             if not self.is_recording:
+                self.active_recording_device = device_path
                 self.audio_data = []
                 self.is_recording = True
-                print("\nRecording started (Holding Right Alt)...")
+                print(f"\nRecording started (Device: {device_path})...")
 
-    def stop_recording(self):
+    def stop_recording(self, device_path):
         with self.lock:
-            if self.is_recording:
+            if self.is_recording and self.active_recording_device == device_path:
                 self.is_recording = False
+                self.active_recording_device = None
                 print("Recording stopped. Processing...")
                 if self.audio_data:
                     audio = np.concatenate(self.audio_data, axis=0).flatten()
@@ -62,41 +66,50 @@ class VoiceAssistant:
             try:
                 text = self.transcribe(audio)
                 # Small delay to ensure the OS has processed the Alt key release
-                time.sleep(0.2) 
+                time.sleep(0.3) 
                 self.inject_text(text)
             except Exception as e:
                 print(f"Error in transcription worker: {e}")
             self.transcription_queue.task_done()
 
     def transcribe(self, audio):
-        segments, info = self.model.transcribe(audio, beam_size=5)
+        # Force English as requested
+        segments, info = self.model.transcribe(audio, beam_size=5, language="en")
         text = " ".join([segment.text for segment in segments]).strip()
         return text
 
     def inject_text(self, text):
         if not text:
             return
+        # Append a space for convenience if needed, or keep as is
         print(f"Injecting: {text}")
         try:
             env = os.environ.copy()
             if "YDOTOOL_SOCKET" not in env:
                 env["YDOTOOL_SOCKET"] = "/tmp/.ydotool_socket"
-            # Use --key-delay to be safer on some systems
-            subprocess.run(["ydotool", "type", "--key-delay", "1", text], check=True, env=env)
+            
+            # 1. Use wl-copy to put text in clipboard
+            subprocess.run(["wl-copy", text], check=True)
+            
+            # 2. Use ydotool to trigger Ctrl+V (Paste)
+            # This is layout-independent and many versions of ydotool support it directly
+            subprocess.run(["ydotool", "key", "ctrl+v"], check=True, env=env)
+            
         except subprocess.CalledProcessError as e:
-            print(f"Error injecting text with ydotool: {e}")
+            # Fallback to typing if wl-copy fails, though less reliable for layout
+            print(f"Clipboard injection failed, falling back to typing: {e}")
+            subprocess.run(["ydotool", "type", "--key-delay", "1", text], check=True, env=env)
 
     def find_keyboards(self):
         keyboards = []
         for path in list_devices():
             dev = InputDevice(path)
-            # Skip virtual devices like ydotool to avoid loops or noise
-            if "ydotool" in dev.name.lower():
+            name = dev.name.lower()
+            # Ignore virtual/noise devices
+            if any(x in name for x in ["ydotool", "virtual", "video", "button"]):
                 continue
             
-            # Check if device has keyboard-like capabilities
             if ecodes.EV_KEY in dev.capabilities():
-                # Filter for actual keyboards, avoid mice/etc that might have few keys
                 if ecodes.KEY_A in dev.capabilities()[ecodes.EV_KEY]:
                     print(f"Detected keyboard: {dev.name} ({dev.path})")
                     keyboards.append(dev)
@@ -109,11 +122,11 @@ class VoiceAssistant:
                 if event.type == ecodes.EV_KEY:
                     if event.code == TRIGGER_KEY_CODE:
                         if event.value == 1: # Key down
-                            self.start_recording()
+                            self.start_recording(device.path)
                         elif event.value == 0: # Key up
-                            self.stop_recording()
-        except OSError:
-            print(f"Device disconnected: {device.name}")
+                            self.stop_recording(device.path)
+        except (OSError, Exception) as e:
+            print(f"Device error or disconnected: {device.name} - {e}")
 
     def run(self):
         keyboards = self.find_keyboards()
