@@ -39,6 +39,16 @@ class VoiceAssistant:
         if self.is_recording:
             self.audio_data.append(indata.copy())
 
+    def play_beep(self, frequency=440, duration=0.1):
+        """Plays a short beep using sounddevice."""
+        try:
+            t = np.linspace(0, duration, int(SAMPLERATE * duration), False)
+            tone = np.sin(frequency * t * 2 * np.pi)
+            # Ensure tone is float32 for sounddevice
+            sd.play(tone.astype(np.float32), SAMPLERATE)
+        except Exception as e:
+            print(f"Warning: Could not play beep: {e}")
+
     def start_recording(self, device_path):
         with self.lock:
             if not self.is_recording:
@@ -46,6 +56,7 @@ class VoiceAssistant:
                 self.audio_data = []
                 self.is_recording = True
                 print(f"\nRecording started (Device: {device_path})...")
+                self.play_beep(frequency=600) # High beep for start
 
     def stop_recording(self, device_path):
         with self.lock:
@@ -53,6 +64,7 @@ class VoiceAssistant:
                 self.is_recording = False
                 self.active_recording_device = None
                 print("Recording stopped. Processing...")
+                self.play_beep(frequency=400) # Lower beep for stop
                 if self.audio_data:
                     audio = np.concatenate(self.audio_data, axis=0).flatten()
                     self.transcription_queue.put(audio)
@@ -73,8 +85,8 @@ class VoiceAssistant:
             self.transcription_queue.task_done()
 
     def transcribe(self, audio):
-        # Force English as requested
-        segments, info = self.model.transcribe(audio, beam_size=5, language="en")
+        # Force English as requested, enable Silero VAD for better accuracy
+        segments, info = self.model.transcribe(audio, beam_size=5, language="en", vad_filter=True)
         text = " ".join([segment.text for segment in segments]).strip()
         return text
 

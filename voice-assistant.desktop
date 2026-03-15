@@ -1,0 +1,9 @@
+[Desktop Entry]
+Name=Voice Assistant
+Comment=Local Voice-to-Text Assistant
+Exec=/home/chris/projects/ml/voice/run_voice_assistant.sh
+Icon=audio-input-microphone
+Type=Application
+Categories=Utility;
+Terminal=false
+StartupNotify=false

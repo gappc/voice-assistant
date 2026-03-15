@@ -1,0 +1,20 @@
+[project]
+name = "voice-assistant"
+version = "0.1.0"
+description = "Local voice assistant with push-to-talk and Whisper transcription"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "faster-whisper",
+    "sounddevice",
+    "numpy",
+    "evdev",
+    "pynput",
+]
+
+[project.scripts]
+voice-assistant = "voice_assistant:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
