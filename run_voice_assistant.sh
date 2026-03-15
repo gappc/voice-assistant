@@ -11,4 +11,6 @@ if ! pgrep ydotoold > /dev/null; then
 fi
 
 export YDOTOOL_SOCKET=/tmp/.ydotool_socket
+# Run the voice assistant in the foreground or background? 
+# The python script now runs a persistent listener.
 python3 /home/chris/projects/ml/voice/voice_assistant.py
