@@ -1,0 +1,62 @@
+# Local Voice Assistant
+
+A fast, privacy-respecting, and reliable local voice-to-text assistant designed specifically for Linux (Wayland). It records your voice while you hold a global hotkey, transcribes it locally using Whisper, and injects the text perfectly anywhere your cursor is, regardless of your keyboard layout.
+
+## Features
+
+- **Push-to-Talk**: Hold **Right Alt** anywhere in the OS to record, release to transcribe and type. 
+- **Wayland-Native Global Hotkeys**: Uses `evdev` to capture key events directly from the hardware, bypassing Wayland security limitations that block traditional listeners like `pynput`.
+- **Layout-Independent Text Injection**: Uses `wl-copy` and `ydotool` (Ctrl+V simulation) to paste the transcribed text. This ensures 100% accuracy for special characters and prevents mixed-up letters on non-US layouts (like Z/Y on German QWERTZ).
+- **Audio Feedback**: Plays subtle beeps indicating when recording starts and stops—no need to look at a terminal or status bar.
+- **Voice Activity Detection (VAD)**: Built-in Silero VAD filtering ensures cleaner, more accurate transcriptions by trimming silent audio.
+- **Background Service & Desktop Integration**: Includes a simple `.desktop` file for easy launching from your app menu or startup applications.
+
+## Requirements
+
+Ensure the following system dependencies are installed:
+- `ydotool` (for keyboard simulation)
+- `wl-clipboard` (for Wayland clipboard access)
+- Your user must be in the `input` group for `evdev` access (`sudo usermod -aG input $USER`).
+
+## Installation
+
+This project uses `uv` for seamless, lightning-fast Python dependency management.
+
+1. **Install uv**: If you haven't already:
+   ```bash
+   curl -LsSf https://astral.sh/uv/install.sh | sh
+   ```
+2. **Setup and Run**: 
+   ```bash
+   uv run voice_assistant.py
+   ```
+   `uv` will automatically create an isolated virtual environment and fetch all python dependencies (`faster-whisper`, `sounddevice`, `evdev`, etc.).
+
+## Usage
+
+1. **Run the assistant:**
+   ```bash
+   uv run voice_assistant.py
+   ```
+2. You'll see "Assistant ready!" in the terminal. It runs entirely in the background.
+3. Place your cursor anywhere you want to type.
+4. Hold the **Right Alt** (AltGr) key. You will hear a high beep.
+5. Speak your text.
+6. Release the key. You will hear a lower beep, and your transcribed text will be instantly pasted.
+
+## Desktop Integration
+
+To add the assistant to your Ubuntu app launcher so you can start it without opening a terminal:
+
+```bash
+mkdir -p ~/.local/share/applications
+cp voice-assistant.desktop ~/.local/share/applications/
+```
+
+You can then search for "Voice Assistant" in your application menu, or add it to your "Startup Applications" to have it always ready.
+
+## Troubleshooting
+
+- **No Key Detection**: If the script boots up but holding Right Alt does nothing, make sure your user is part of the `input` group. (You may need to log out and log back in after joining).
+- **Text isn't pasting**: The script automatically manages the `ydotoold` daemon. Make sure `wl-clipboard` is installed so the assistant can populate your clipboard.
+- **Microphone issues**: Check your default input device in your GNOME/desktop sound settings.
