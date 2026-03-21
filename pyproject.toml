@@ -9,6 +9,7 @@ dependencies = [
     "sounddevice",
     "numpy",
     "evdev",
+    "PySide6-Essentials",
 ]
 
 [project.scripts]
