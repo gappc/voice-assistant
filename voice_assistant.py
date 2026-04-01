@@ -19,7 +19,7 @@ DEVICE = "cpu"
 COMPUTE_TYPE = "int8"
 CHANNELS = 1
 SAMPLERATE = 16000
-TRIGGER_KEY_CODE = ecodes.KEY_F23  # Use the Menu key (detected as F23) as trigger
+TRIGGER_KEY_CODE = ecodes.KEY_RIGHTALT  # Scan code 100
 KEYBOARD_LAYOUT = "de" # Set to "de" for German, "us" for US
 
 # Helper for thread-safe UI updates
@@ -255,7 +255,7 @@ class VoiceAssistant:
             print("No keyboard devices found! Check permissions or /dev/input permissions.")
             return
 
-        print(f"Assistant ready! Hold the 'Menu' key to record (detected as F23).")
+        print(f"Assistant ready! Hold Right Alt to record (with beeps).")
         
         # Start input stream and keyboard threads
         with sd.InputStream(samplerate=SAMPLERATE, channels=CHANNELS, callback=self.record_callback):
