@@ -5,11 +5,12 @@ import subprocess
 import threading
 import queue
 import signal
+import argparse
 import numpy as np
 import sounddevice as sd
 from faster_whisper import WhisperModel
 from PySide6.QtWidgets import QApplication, QSystemTrayIcon, QMenu
-from PySide6.QtGui import QIcon, QAction, QCursor, QPixmap, QPainter, QColor, QBrush
+from PySide6.QtGui import QIcon, QAction, QCursor, QPixmap, QPainter, QColor, QBrush, QActionGroup
 from PySide6.QtCore import QTimer, Qt, Signal, QObject, Slot
 from evdev import InputDevice, categorize, ecodes, list_devices
 
@@ -27,7 +28,7 @@ class UIUpdater(QObject):
     update_signal = Signal()
 
 class VoiceAssistant:
-    def __init__(self):
+    def __init__(self, initial_device=None):
         print(f"Loading Whisper model '{MODEL_SIZE}'...")
         self.model = WhisperModel(MODEL_SIZE, device=DEVICE, compute_type=COMPUTE_TYPE)
         self.is_recording = False
@@ -41,6 +42,8 @@ class VoiceAssistant:
         self.active_recording_device = None 
         self.running = True
         self.window = None
+        self.stream = None
+        self.current_device = initial_device
 
         # Setup signal handlers
         signal.signal(signal.SIGINT, self.handle_signal)
@@ -111,24 +114,86 @@ class VoiceAssistant:
     def inject_text(self, text):
         if not text:
             return
-        # Append a space for convenience if needed, or keep as is
+        
         print(f"Injecting: {text}")
         try:
             env = os.environ.copy()
+            uid = os.getuid()
             if "YDOTOOL_SOCKET" not in env:
-                env["YDOTOOL_SOCKET"] = "/tmp/.ydotool_socket"
+                env["YDOTOOL_SOCKET"] = f"/run/user/{uid}/.ydotool_socket"
             
             # 1. Use wl-copy to put text in clipboard
+            print("  - Copying to clipboard...")
             subprocess.run(["wl-copy", text], check=True)
             
+            # Small delay to ensure the OS has registered the clipboard change
+            time.sleep(0.1)
+            
             # 2. Use ydotool to trigger Ctrl+V (Paste)
-            # This is layout-independent and many versions of ydotool support it directly
-            subprocess.run(["ydotool", "key", "ctrl+v"], check=True, env=env)
+            # Using raw key codes for maximum compatibility: 
+            # 29:1 (Left Ctrl down), 47:1 (V down), 47:0 (V up), 29:0 (Left Ctrl up)
+            print("  - Triggering Ctrl+V...")
+            subprocess.run(["ydotool", "key", "29:1", "47:1", "47:0", "29:0"], check=True, env=env)
+            print("  - Done.")
             
         except subprocess.CalledProcessError as e:
-            # Fallback to typing if wl-copy fails, though less reliable for layout
+            # Fallback to typing if wl-copy or ydotool fails
             print(f"Clipboard injection failed, falling back to typing: {e}")
             subprocess.run(["ydotool", "type", "--key-delay", "1", text], check=True, env=env)
+
+    def get_input_devices(self):
+        """Returns a list of available input devices."""
+        devices = sd.query_devices()
+        input_devices = []
+        for i, d in enumerate(devices):
+            if d['max_input_channels'] > 0:
+                input_devices.append({'index': i, 'name': d['name']})
+        return input_devices
+
+    def set_input_device(self, device_id_or_name):
+        """Sets the input device and restarts the stream if necessary."""
+        devices = self.get_input_devices()
+        target_index = None
+
+        # Try to find by index first if it's an int or string digit
+        try:
+            idx = int(device_id_or_name)
+            if any(d['index'] == idx for d in devices):
+                target_index = idx
+        except (ValueError, TypeError):
+            pass
+
+        # Try to find by name if not found by index
+        if target_index is None:
+            for d in devices:
+                if device_id_or_name and device_id_or_name.lower() in d['name'].lower():
+                    target_index = d['index']
+                    break
+        
+        # Default to system default if still not found
+        if target_index is None:
+            if device_id_or_name:
+                print(f"Warning: Device '{device_id_or_name}' not found. Using default.")
+            target_index = sd.default.device[0]
+
+        with self.lock:
+            self.current_device = target_index
+            if self.stream is not None:
+                self.stream.stop()
+                self.stream.close()
+            
+            try:
+                self.stream = sd.InputStream(
+                    device=self.current_device,
+                    samplerate=SAMPLERATE,
+                    channels=CHANNELS,
+                    callback=self.record_callback
+                )
+                self.stream.start()
+                print(f"Input device set to: {sd.query_devices(self.current_device)['name']} (Index: {self.current_device})")
+            except Exception as e:
+                print(f"Error starting audio stream on device {self.current_device}: {e}")
+                self.stream = None
 
     def find_keyboards(self):
         keyboards = []
@@ -160,7 +225,8 @@ class VoiceAssistant:
 
     def ensure_ydotoold(self):
         """Ensures ydotoold is running and sets the socket environment variable."""
-        os.environ["YDOTOOL_SOCKET"] = "/tmp/.ydotool_socket"
+        uid = os.getuid()
+        os.environ["YDOTOOL_SOCKET"] = f"/run/user/{uid}/.ydotool_socket"
         try:
             # Check if ydotoold is running
             subprocess.run(["pgrep", "ydotoold"], check=True, capture_output=True)
@@ -238,6 +304,12 @@ class VoiceAssistant:
         self.status_action.setEnabled(False)
         
         self.tray_menu.addSeparator()
+        
+        # Microphone selection menu
+        self.mic_menu = self.tray_menu.addMenu("Microphone")
+        self.refresh_mic_menu()
+        
+        self.tray_menu.addSeparator()
         quit_action = self.tray_menu.addAction("Close Voice Assistant")
         quit_action.triggered.connect(self.stop)
         
@@ -246,7 +318,23 @@ class VoiceAssistant:
         self.tray.show()
         
         print("Tray icon started (PySide6).")
-        sys.exit(self.app.exec())
+        return self.app.exec()
+
+    def refresh_mic_menu(self):
+        """Populates the microphone selection submenu."""
+        self.mic_menu.clear()
+        devices = self.get_input_devices()
+        group = QActionGroup(self.mic_menu)
+        
+        for d in devices:
+            action = QAction(d['name'], self.mic_menu, checkable=True)
+            if d['index'] == self.current_device:
+                action.setChecked(True)
+            
+            # Use a lambda with default argument to capture the current device index
+            action.triggered.connect(lambda checked, idx=d['index']: self.set_input_device(idx))
+            self.mic_menu.addAction(action)
+            group.addAction(action)
 
     def run(self):
         self.ensure_ydotoold()
@@ -255,19 +343,44 @@ class VoiceAssistant:
             print("No keyboard devices found! Check permissions or /dev/input permissions.")
             return
 
+        # Initialize the audio stream
+        self.set_input_device(self.current_device)
+        
         print(f"Assistant ready! Hold Right Alt to record (with beeps).")
         
-        # Start input stream and keyboard threads
-        with sd.InputStream(samplerate=SAMPLERATE, channels=CHANNELS, callback=self.record_callback):
-            for kb in keyboards:
-                threading.Thread(target=self.listen_to_device, args=(kb,), daemon=True).start()
-            
-            # Start PySide6 Tray (blocks until quit)
-            self.run_tray()
+        for kb in keyboards:
+            threading.Thread(target=self.listen_to_device, args=(kb,), daemon=True).start()
+        
+        # Start PySide6 Tray (blocks until quit)
+        exit_code = self.run_tray()
+        
+        # Cleanup
+        if self.stream:
+            self.stream.stop()
+            self.stream.close()
+        sys.exit(exit_code)
+
+    def test_injection(self):
+        """Tests the injection logic with a dummy message."""
+        self.ensure_ydotoold()
+        print("Test injection starting in 3 seconds... Switch to your editor!")
+        time.sleep(3)
+        test_text = "This is a test transcription from the local voice assistant."
+        self.inject_text(test_text)
+        print("Test injection sequence complete.")
 
 def main():
-    assistant = VoiceAssistant()
-    assistant.run()
+    parser = argparse.ArgumentParser(description="Local voice assistant with push-to-talk.")
+    parser.add_argument("--device", type=str, help="Preferred input device name or index")
+    parser.add_argument("--test-injection", action="store_true", help="Test text injection and exit")
+    args = parser.parse_args()
+
+    assistant = VoiceAssistant(initial_device=args.device)
+    
+    if args.test_injection:
+        assistant.test_injection()
+    else:
+        assistant.run()
 
 if __name__ == "__main__":
     main()
