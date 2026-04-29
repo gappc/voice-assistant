@@ -61,7 +61,7 @@ You can then search for "Voice Assistant" in your application menu, or add it to
 - **Text isn't pasting**: 
     - The assistant uses `wl-copy` and `ydotool` to simulate a Ctrl+V paste. Ensure both are installed.
     - **Test Injection**: Run `uv run voice_assistant.py --test-injection` to verify if the script can type into a focused window without recording.
-    - **Environment Check**: Run `uv run scratch/debug_input.py` to check for `ydotool` socket issues and list your input devices.
+    - **Environment Check**: Run `uv run tools/debug_input.py` to check for `ydotool` socket issues and list your input devices.
     - **Permissions**: Ensure your user is in the `input` group and has access to `/dev/uinput`.
 - **Wrong Key Detected**: If your keyboard isn't being picked up (e.g., you suspected `/dev/input/event16`), the script automatically finds all keyboards. You can verify which one is being used in the terminal output at startup.
 - **Microphone issues**: Check your default input device in your GNOME/desktop sound settings.
