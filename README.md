@@ -46,11 +46,11 @@ This project uses `uv` for seamless, lightning-fast Python dependency management
 
 ## Desktop Integration
 
-To add the assistant to your Ubuntu app launcher so you can start it without opening a terminal:
+To add the assistant to your app launcher so you can start it without opening a terminal:
 
 ```bash
 mkdir -p ~/.local/share/applications
-cp voice-assistant.desktop ~/.local/share/applications/
+sed "s|/PATH/TO/PROJECT|$(pwd)|g" voice-assistant.desktop > ~/.local/share/applications/voice-assistant.desktop
 ```
 
 You can then search for "Voice Assistant" in your application menu, or add it to your "Startup Applications" to have it always ready.

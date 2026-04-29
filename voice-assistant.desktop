@@ -1,7 +1,7 @@
 [Desktop Entry]
 Name=Voice Assistant
 Comment=Local Voice-to-Text Assistant
-Exec=uv run --project /home/chris/projects/ml/voice /home/chris/projects/ml/voice/voice_assistant.py
+Exec=uv run --project /PATH/TO/PROJECT /PATH/TO/PROJECT/voice_assistant.py
 Icon=audio-input-microphone
 Type=Application
 Categories=Utility;
