@@ -39,11 +39,14 @@ class VoiceAssistant:
         
         self.lock = threading.Lock()
         # Track active recording to prevent duplicate starts from multiple devices
-        self.active_recording_device = None 
+        self.active_recording_device = None
         self.running = True
         self.window = None
         self.stream = None
         self.current_device = initial_device
+        # Ctrl+Shift+V works in terminals and most editors; flip off for apps
+        # that reserve it (e.g. LibreOffice "Paste Special").
+        self.paste_with_shift = True
 
         # Setup signal handlers
         signal.signal(signal.SIGINT, self.handle_signal)
@@ -129,11 +132,14 @@ class VoiceAssistant:
             # Small delay to ensure the OS has registered the clipboard change
             time.sleep(0.1)
             
-            # 2. Use ydotool to trigger Ctrl+V (Paste)
-            # Using raw key codes for maximum compatibility: 
-            # 29:1 (Left Ctrl down), 47:1 (V down), 47:0 (V up), 29:0 (Left Ctrl up)
-            print("  - Triggering Ctrl+V...")
-            subprocess.run(["ydotool", "key", "29:1", "47:1", "47:0", "29:0"], check=True, env=env)
+            # 2. Use ydotool to trigger paste. Codes: 29=LCTRL, 42=LSHIFT, 47=V.
+            if self.paste_with_shift:
+                print("  - Triggering Ctrl+Shift+V...")
+                paste_keys = ["29:1", "42:1", "47:1", "47:0", "42:0", "29:0"]
+            else:
+                print("  - Triggering Ctrl+V...")
+                paste_keys = ["29:1", "47:1", "47:0", "29:0"]
+            subprocess.run(["ydotool", "key", *paste_keys], check=True, env=env)
             print("  - Done.")
             
         except subprocess.CalledProcessError as e:
@@ -308,7 +314,14 @@ class VoiceAssistant:
         # Microphone selection menu
         self.mic_menu = self.tray_menu.addMenu("Microphone")
         self.refresh_mic_menu()
-        
+
+        self.tray_menu.addSeparator()
+
+        paste_action = self.tray_menu.addAction("Use Ctrl+Shift+V (terminal-compatible)")
+        paste_action.setCheckable(True)
+        paste_action.setChecked(self.paste_with_shift)
+        paste_action.toggled.connect(self.set_paste_with_shift)
+
         self.tray_menu.addSeparator()
         quit_action = self.tray_menu.addAction("Close Voice Assistant")
         quit_action.triggered.connect(self.stop)
@@ -319,6 +332,10 @@ class VoiceAssistant:
         
         print("Tray icon started (PySide6).")
         return self.app.exec()
+
+    def set_paste_with_shift(self, enabled):
+        self.paste_with_shift = enabled
+        print(f"Paste mode: {'Ctrl+Shift+V' if enabled else 'Ctrl+V'}")
 
     def refresh_mic_menu(self):
         """Populates the microphone selection submenu."""

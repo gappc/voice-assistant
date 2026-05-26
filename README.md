@@ -6,7 +6,7 @@ A fast, privacy-respecting, and reliable local voice-to-text assistant designed 
 
 - **Push-to-Talk**: Hold **Right Alt** anywhere in the OS to record, release to transcribe and type. 
 - **Wayland-Native Global Hotkeys**: Uses `evdev` to capture key events directly from the hardware, bypassing Wayland security limitations that block traditional listeners like `pynput`.
-- **Layout-Independent Text Injection**: Uses `wl-copy` and `ydotool` (Ctrl+V simulation) to paste the transcribed text. This ensures 100% accuracy for special characters and prevents mixed-up letters on non-US layouts (like Z/Y on German QWERTZ).
+- **Layout-Independent Text Injection**: Uses `wl-copy` and `ydotool` (Ctrl+Shift+V simulation by default) to paste the transcribed text. This ensures 100% accuracy for special characters and prevents mixed-up letters on non-US layouts (like Z/Y on German QWERTZ). The default Ctrl+Shift+V works in terminals as well as editors and IDEs; a tray menu toggle is provided to switch to plain Ctrl+V for apps that reserve Ctrl+Shift+V (e.g. LibreOffice "Paste Special").
 - **Audio Feedback**: Plays subtle beeps indicating when recording starts and stops—no need to look at a terminal or status bar.
 - **Voice Activity Detection (VAD)**: Built-in Silero VAD filtering ensures cleaner, more accurate transcriptions by trimming silent audio.
 - **Background Service & Desktop Integration**: Includes a simple `.desktop` file for easy launching from your app menu or startup applications.
@@ -58,8 +58,8 @@ You can then search for "Voice Assistant" in your application menu, or add it to
 ## Troubleshooting
 
 - **No Key Detection**: If the script boots up but holding Right Alt does nothing, make sure your user is part of the `input` group. (You may need to log out and log back in after joining).
-- **Text isn't pasting**: 
-    - The assistant uses `wl-copy` and `ydotool` to simulate a Ctrl+V paste. Ensure both are installed.
+- **Text isn't pasting**:
+    - The assistant uses `wl-copy` and `ydotool` to simulate a Ctrl+Shift+V paste by default (works in terminals and most editors). Ensure both are installed. If your target app does not accept Ctrl+Shift+V (e.g. LibreOffice), toggle off "Use Ctrl+Shift+V (terminal-compatible)" in the tray menu to fall back to plain Ctrl+V.
     - **Test Injection**: Run `uv run voice_assistant.py --test-injection` to verify if the script can type into a focused window without recording.
     - **Environment Check**: Run `uv run tools/debug_input.py` to check for `ydotool` socket issues and list your input devices.
     - **Permissions**: Ensure your user is in the `input` group and has access to `/dev/uinput`.
