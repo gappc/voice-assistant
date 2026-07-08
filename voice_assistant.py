@@ -14,7 +14,7 @@ from PySide6.QtGui import QIcon, QAction, QCursor, QPixmap, QPainter, QColor, QB
 from PySide6.QtCore import QTimer, Qt, Signal, QObject, Slot
 from evdev import InputDevice, categorize, ecodes, list_devices
 
-from speech_reader import SpeechReader
+from speech_reader import SpeechReader, VOICE_CATALOG, DEFAULT_VOICE
 from text_source import get_text_to_read
 
 # --- Configuration ---
@@ -26,16 +26,7 @@ SAMPLERATE = 16000
 TRIGGER_KEY_CODE = ecodes.KEY_RIGHTALT  # Scan code 100
 KEYBOARD_LAYOUT = "de" # Set to "de" for German, "us" for US
 READ_KEY_CODE = ecodes.KEY_F23  # Copilot key emits Meta+Shift+F23; F23 is the tell
-DEFAULT_VOICE = "en_US-amy-medium"
 READ_SPEED = 1.0  # Piper length_scale (1.0 = normal; >1 slower, <1 faster)
-VOICE_PRESETS = [
-    "en_US-amy-medium",
-    "en_US-ryan-medium",
-    "en_GB-alan-medium",
-    "en_GB-alba-medium",
-    "de_DE-thorsten-high",
-    "de_DE-mls-medium",
-]
 SPEED_PRESETS = {"Slow": 1.3, "Normal": 1.0, "Fast": 0.8}
 
 # Helper for thread-safe UI updates
@@ -447,7 +438,7 @@ class VoiceAssistant:
         """Populates the voice-selection submenu from the presets."""
         self.voice_menu.clear()
         group = QActionGroup(self.voice_menu)
-        for name in VOICE_PRESETS:
+        for name in VOICE_CATALOG.keys():
             action = QAction(name, self.voice_menu, checkable=True)
             if name == self.reader._voice_name:
                 action.setChecked(True)
@@ -507,9 +498,10 @@ class VoiceAssistant:
             self.stream.close()
         sys.exit(exit_code)
 
-    def test_read(self, text):
+    def test_read(self, text, voice=None):
         """Speak the given text with the default voice and exit (no hotkeys/tray)."""
-        reader = SpeechReader(voice_name=DEFAULT_VOICE, speed=READ_SPEED)
+        voice = voice or DEFAULT_VOICE
+        reader = SpeechReader(voice_name=voice, speed=READ_SPEED)
         reader.load()
         print(f"Speaking: {text}")
         reader.start(text)
@@ -531,6 +523,8 @@ def main():
     parser.add_argument("--test-injection", action="store_true", help="Test text injection and exit")
     parser.add_argument("--test-read", type=str, metavar="TEXT",
                         help="Speak the given text and exit")
+    parser.add_argument("--voice", type=str, default=DEFAULT_VOICE,
+                        help="Voice to use for --test-read")
     args = parser.parse_args()
 
     assistant = VoiceAssistant(initial_device=args.device)
@@ -538,7 +532,7 @@ def main():
     if args.test_injection:
         assistant.test_injection()
     elif args.test_read:
-        assistant.test_read(args.test_read)
+        assistant.test_read(args.test_read, voice=args.voice)
     else:
         assistant.run()
 

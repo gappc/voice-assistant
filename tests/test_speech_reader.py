@@ -146,3 +146,159 @@ def test_start_then_wait_resets_state_and_notifies(monkeypatch):
     r.wait()
     assert r.is_reading is False
     assert states  # on_state_change fired at least once
+
+
+def test_split_sentences():
+    from speech_reader import split_sentences
+    assert split_sentences("This is a sentence. And another! Is it?") == [
+        "This is a sentence.",
+        "And another!",
+        "Is it?",
+    ]
+    assert split_sentences("Hello world") == ["Hello world"]
+    assert split_sentences("") == []
+    assert split_sentences("  Spaces at ends.  ") == ["Spaces at ends."]
+    # Verify the abbreviation known limitation
+    assert split_sentences("Dr. Smith is here.") == ["Dr.", "Smith is here."]
+
+
+def test_ensure_kokoro_voice_files(monkeypatch, tmp_path):
+    calls = []
+
+    def fake_urlretrieve(url, filename):
+        calls.append((url, filename))
+        # Simulate download producing the files
+        Path(filename).write_text("dummy")
+
+    import urllib.request
+    monkeypatch.setattr(urllib.request, "urlretrieve", fake_urlretrieve)
+
+    # Use a mock config for KOKORO_VOICE_SOURCES so we don't depend on actual HF config in tests
+    mock_sources = {
+        "test-voice": {
+            "repo": "test-repo/voice",
+            "commit": "123456",
+            "model_file": "test.onnx",
+            "voices_file": "test.npz",
+        }
+    }
+    monkeypatch.setattr(speech_reader, "KOKORO_VOICE_SOURCES", mock_sources)
+
+    model_path, voices_path = speech_reader.ensure_kokoro_voice_files("test-voice", tmp_path)
+
+    assert model_path == tmp_path / "kokoro" / "test.onnx"
+    assert voices_path == tmp_path / "kokoro" / "test.npz"
+    assert model_path.exists()
+    assert voices_path.exists()
+    assert len(calls) == 2
+    assert "https://huggingface.co/test-repo/voice/resolve/123456/test.onnx" in calls[0][0]
+    assert "https://huggingface.co/test-repo/voice/resolve/123456/test.npz" in calls[1][0]
+
+
+def test_ensure_kokoro_voice_files_skips_when_present(monkeypatch, tmp_path):
+    kokoro_dir = tmp_path / "kokoro"
+    kokoro_dir.mkdir()
+    (kokoro_dir / "test.onnx").write_text("already here")
+    (kokoro_dir / "test.npz").write_text("already here")
+
+    def fail_urlretrieve(url, filename):
+        raise AssertionError("should not download when files exist")
+
+    import urllib.request
+    monkeypatch.setattr(urllib.request, "urlretrieve", fail_urlretrieve)
+
+    mock_sources = {
+        "test-voice": {
+            "repo": "test-repo/voice",
+            "commit": "123456",
+            "model_file": "test.onnx",
+            "voices_file": "test.npz",
+        }
+    }
+    monkeypatch.setattr(speech_reader, "KOKORO_VOICE_SOURCES", mock_sources)
+
+    model_path, voices_path = speech_reader.ensure_kokoro_voice_files("test-voice", tmp_path)
+    assert model_path == kokoro_dir / "test.onnx"
+    assert voices_path == kokoro_dir / "test.npz"
+
+
+def test_kokoro_engine_speed_translation(monkeypatch):
+    import sys
+    import types
+    import numpy as np
+
+    class FakeKokoro:
+        def __init__(self, model_path, voices_path):
+            self.created_calls = []
+
+        def create(self, text, voice, speed, lang):
+            self.created_calls.append((text, voice, speed, lang))
+            return np.zeros(10, dtype=np.float32), 24000
+
+    # Inject mock Kokoro class
+    monkeypatch.setitem(sys.modules, "kokoro_onnx", types.ModuleType("kokoro_onnx"))
+    import kokoro_onnx
+    kokoro_onnx.Kokoro = FakeKokoro
+
+    # Avoid downloading files
+    monkeypatch.setattr(speech_reader, "ensure_kokoro_voice_files", lambda name, folder: (Path("model"), Path("voices")))
+
+    # Create KokoroEngine
+    engine = speech_reader.KokoroEngine(model_name="martin", voice_id="dm_martin", lang="de", voices_dir=Path("/dummy"))
+    engine.load()
+
+    # Normal speed (reciprocal of 1.0 is 1.0)
+    list(engine.synthesize("test", 1.0))
+    assert engine._kokoro.created_calls[-1][2] == 1.0
+
+    # Slow speed (reciprocal of 1.3 is ~0.769)
+    list(engine.synthesize("test", 1.3))
+    assert abs(engine._kokoro.created_calls[-1][2] - 1.0 / 1.3) < 1e-5
+
+    # Fast speed (reciprocal of 0.8 is 1.25)
+    list(engine.synthesize("test", 0.8))
+    assert engine._kokoro.created_calls[-1][2] == 1.25
+
+    # Extreme slow (Piper length_scale 3.0 -> reciprocal 0.33 -> clamped to 0.5)
+    list(engine.synthesize("test", 3.0))
+    assert engine._kokoro.created_calls[-1][2] == 0.5
+
+    # Extreme fast (Piper length_scale 0.2 -> reciprocal 5.0 -> clamped to 2.0)
+    list(engine.synthesize("test", 0.2))
+    assert engine._kokoro.created_calls[-1][2] == 2.0
+
+
+def test_speech_reader_stops_between_sentences(monkeypatch):
+    from speech_reader import AudioChunk
+    import numpy as np
+    synthesized_sentences = []
+
+    class MockEngine:
+        def load(self):
+            pass
+
+        def synthesize(self, text, speed):
+            synthesized_sentences.append(text)
+            yield AudioChunk(np.zeros(2048, dtype=np.int16), 22050)
+
+    r = speech_reader.SpeechReader("en_US-amy-medium")
+    # Set the active engine to MockEngine directly
+    mock_engine = MockEngine()
+    monkeypatch.setattr(r, "_get_or_create_engine", lambda spec: mock_engine)
+
+    # Let _play_chunks stop the reader immediately when it plays the first chunk
+    def mock_play(chunks):
+        # We consume one chunk, then trigger a stop on the reader
+        for samples, rate in chunks:
+            r.stop()  # set the stop event
+            break
+
+    monkeypatch.setattr(r, "_play_chunks", mock_play)
+
+    # We start with a multi-sentence text
+    r.start("Sentence one. Sentence two.")
+    r.wait()
+
+    # Sentence one should have been synthesized, but sentence two should NOT be synthesized
+    # because of the early stop check in the sentence loop of _iter_chunks
+    assert synthesized_sentences == ["Sentence one."]
