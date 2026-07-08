@@ -33,6 +33,8 @@ VOICE_PRESETS = [
     "en_US-ryan-medium",
     "en_GB-alan-medium",
     "en_GB-alba-medium",
+    "de_DE-thorsten-high",
+    "de_DE-mls-medium",
 ]
 SPEED_PRESETS = {"Slow": 1.3, "Normal": 1.0, "Fast": 0.8}
 

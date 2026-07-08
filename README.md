@@ -53,7 +53,7 @@ This project uses `uv` for seamless, lightning-fast Python dependency management
 
 The default voice is `en_US-amy-medium`, downloaded automatically on first use and
 cached under `~/.local/share/voice-assistant/voices/`. Use the tray menu to switch
-the **Output** device, **Voice** (Amy / Ryan / Alan / Alba), and **Reading Speed**
+the **Output** device, **Voice** (Amy / Ryan / Alan / Alba / Thorsten / MLS German), and **Reading Speed**
 (Slow / Normal / Fast). Starting dictation (Right Alt) stops any in-progress reading.
 
 Test speech without the hotkey:
