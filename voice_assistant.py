@@ -317,9 +317,13 @@ class VoiceAssistant:
 
     def _do_update_ui(self):
         if hasattr(self, 'status_action'):
-            status = "Recording..." if self.is_recording else "Idle"
+            if self.is_recording:
+                status = "Recording..."
+            elif self.reader.is_reading:
+                status = "Reading..."
+            else:
+                status = "Idle"
             self.status_action.setText(f"Status: {status}")
-            # Update the icon as well
             self.tray.setIcon(self.create_tray_icon())
 
     def create_tray_icon(self):
@@ -330,8 +334,12 @@ class VoiceAssistant:
         painter = QPainter(pixmap)
         painter.setRenderHint(QPainter.Antialiasing)
         
-        # Color: Red for recording, Blue for idle
-        color = QColor(255, 80, 80) if self.is_recording else QColor(100, 200, 255)
+        if self.is_recording:
+            color = QColor(255, 80, 80)   # red: recording
+        elif self.reader.is_reading:
+            color = QColor(80, 220, 120)  # green: reading
+        else:
+            color = QColor(100, 200, 255) # blue: idle
         
         # Draw a simple microphone shape
         painter.setBrush(QBrush(color))
@@ -367,6 +375,18 @@ class VoiceAssistant:
         # Microphone selection menu
         self.mic_menu = self.tray_menu.addMenu("Microphone")
         self.refresh_mic_menu()
+
+        # Output device selection menu
+        self.output_menu = self.tray_menu.addMenu("Output")
+        self.refresh_output_menu()
+
+        # Voice selection menu
+        self.voice_menu = self.tray_menu.addMenu("Voice")
+        self.build_voice_menu()
+
+        # Reading speed menu
+        self.speed_menu = self.tray_menu.addMenu("Reading Speed")
+        self.build_speed_menu()
 
         self.tray_menu.addSeparator()
 
@@ -405,6 +425,58 @@ class VoiceAssistant:
             action.triggered.connect(lambda checked, idx=d['index']: self.set_input_device(idx))
             self.mic_menu.addAction(action)
             group.addAction(action)
+
+    def refresh_output_menu(self):
+        """Populates the output-device selection submenu."""
+        self.output_menu.clear()
+        devices = self.get_output_devices()
+        group = QActionGroup(self.output_menu)
+        for d in devices:
+            action = QAction(d['name'], self.output_menu, checkable=True)
+            if d['index'] == self.output_device:
+                action.setChecked(True)
+            action.triggered.connect(
+                lambda checked, idx=d['index']: self.set_output_device(idx)
+            )
+            self.output_menu.addAction(action)
+            group.addAction(action)
+
+    def build_voice_menu(self):
+        """Populates the voice-selection submenu from the presets."""
+        self.voice_menu.clear()
+        group = QActionGroup(self.voice_menu)
+        for name in VOICE_PRESETS:
+            action = QAction(name, self.voice_menu, checkable=True)
+            if name == self.reader._voice_name:
+                action.setChecked(True)
+            action.triggered.connect(lambda checked, n=name: self.on_select_voice(n))
+            self.voice_menu.addAction(action)
+            group.addAction(action)
+
+    def build_speed_menu(self):
+        """Populates the reading-speed submenu."""
+        self.speed_menu.clear()
+        group = QActionGroup(self.speed_menu)
+        for label, scale in SPEED_PRESETS.items():
+            action = QAction(label, self.speed_menu, checkable=True)
+            if abs(scale - READ_SPEED) < 1e-9:
+                action.setChecked(True)
+            action.triggered.connect(lambda checked, s=scale: self.reader.set_speed(s))
+            self.speed_menu.addAction(action)
+            group.addAction(action)
+
+    def on_select_voice(self, name):
+        """Switch the Piper voice (downloads on demand)."""
+        try:
+            print(f"Switching voice to {name} ...")
+            self.reader.set_voice(name)
+        except Exception as exc:
+            print(f"[read] failed to switch voice to {name}: {exc}", file=sys.stderr)
+            self.tray.showMessage(
+                "Voice Assistant",
+                f"Could not load voice '{name}': {exc}",
+                QSystemTrayIcon.Warning,
+            )
 
     def run(self):
         self.ensure_ydotoold()
