@@ -52,10 +52,16 @@ def ensure_voice_model(name, voices_dir):
 
 KOKORO_VOICE_SOURCES = {
     "martin": {
-        "repo": "Godelaune/Kokoro-82M-ONNX-German-Martin",
-        "commit": "a1cba7fbf0e72fbae38f0a3a48ce0dc8e6077804",
+        "url_model": "https://huggingface.co/Godelaune/Kokoro-82M-ONNX-German-Martin/resolve/a1cba7fbf0e72fbae38f0a3a48ce0dc8e6077804/kokoro-martin.onnx",
+        "url_voices": "https://huggingface.co/Godelaune/Kokoro-82M-ONNX-German-Martin/resolve/a1cba7fbf0e72fbae38f0a3a48ce0dc8e6077804/voices-martin.npz",
         "model_file": "kokoro-martin.onnx",
         "voices_file": "voices-martin.npz",
+    },
+    "official": {
+        "url_model": "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/kokoro-v1.0.int8.onnx",
+        "url_voices": "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/voices-v1.0.bin",
+        "model_file": "kokoro-v1.0.int8.onnx",
+        "voices_file": "voices-v1.0.bin",
     },
 }
 
@@ -67,15 +73,13 @@ def ensure_kokoro_voice_files(model_name, voices_dir):
     kokoro_dir.mkdir(parents=True, exist_ok=True)
     model_path = kokoro_dir / source["model_file"]
     voices_path = kokoro_dir / source["voices_file"]
-    commit = source["commit"]
-    base_url = f"https://huggingface.co/{source['repo']}/resolve/{commit}"
-    for path, filename in ((model_path, source["model_file"]),
-                            (voices_path, source["voices_file"])):
+    for path, url in ((model_path, source["url_model"]),
+                      (voices_path, source["url_voices"])):
         if not path.exists():
-            print(f"[read] downloading {filename} for kokoro voice '{model_name}' ...")
+            print(f"[read] downloading {path.name} from {url} ...")
             tmp_path = path.with_suffix(".tmp")
             try:
-                urllib.request.urlretrieve(f"{base_url}/{filename}", tmp_path)
+                urllib.request.urlretrieve(url, tmp_path)
                 tmp_path.rename(path)
             finally:
                 if tmp_path.exists():
@@ -110,6 +114,10 @@ VOICE_CATALOG = {
     "de_DE-mls-medium":    VoiceSpec(engine="piper", model="de_DE-mls-medium"),
     "kokoro-de-martin":    VoiceSpec(engine="kokoro", model="martin",
                                       voice_id="martin", lang="de"),
+    "kokoro-en-bella":     VoiceSpec(engine="kokoro", model="official",
+                                      voice_id="af_bella", lang="en-us"),
+    "kokoro-en-sarah":     VoiceSpec(engine="kokoro", model="official",
+                                      voice_id="af_sarah", lang="en-us"),
 }
 
 DEFAULT_VOICE = "en_US-amy-medium"

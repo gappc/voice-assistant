@@ -176,8 +176,8 @@ def test_ensure_kokoro_voice_files(monkeypatch, tmp_path):
     # Use a mock config for KOKORO_VOICE_SOURCES so we don't depend on actual HF config in tests
     mock_sources = {
         "test-voice": {
-            "repo": "test-repo/voice",
-            "commit": "123456",
+            "url_model": "https://example.com/test.onnx",
+            "url_voices": "https://example.com/test.npz",
             "model_file": "test.onnx",
             "voices_file": "test.npz",
         }
@@ -191,8 +191,8 @@ def test_ensure_kokoro_voice_files(monkeypatch, tmp_path):
     assert model_path.exists()
     assert voices_path.exists()
     assert len(calls) == 2
-    assert "https://huggingface.co/test-repo/voice/resolve/123456/test.onnx" in calls[0][0]
-    assert "https://huggingface.co/test-repo/voice/resolve/123456/test.npz" in calls[1][0]
+    assert "https://example.com/test.onnx" == calls[0][0]
+    assert "https://example.com/test.npz" == calls[1][0]
 
 
 def test_ensure_kokoro_voice_files_skips_when_present(monkeypatch, tmp_path):
@@ -209,8 +209,8 @@ def test_ensure_kokoro_voice_files_skips_when_present(monkeypatch, tmp_path):
 
     mock_sources = {
         "test-voice": {
-            "repo": "test-repo/voice",
-            "commit": "123456",
+            "url_model": "https://example.com/test.onnx",
+            "url_voices": "https://example.com/test.npz",
             "model_file": "test.onnx",
             "voices_file": "test.npz",
         }
