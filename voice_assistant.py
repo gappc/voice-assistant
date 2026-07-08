@@ -14,6 +14,9 @@ from PySide6.QtGui import QIcon, QAction, QCursor, QPixmap, QPainter, QColor, QB
 from PySide6.QtCore import QTimer, Qt, Signal, QObject, Slot
 from evdev import InputDevice, categorize, ecodes, list_devices
 
+from speech_reader import SpeechReader
+from text_source import get_text_to_read
+
 # --- Configuration ---
 MODEL_SIZE = "base"
 DEVICE = "cpu"
@@ -22,6 +25,16 @@ CHANNELS = 1
 SAMPLERATE = 16000
 TRIGGER_KEY_CODE = ecodes.KEY_RIGHTALT  # Scan code 100
 KEYBOARD_LAYOUT = "de" # Set to "de" for German, "us" for US
+READ_KEY_CODE = ecodes.KEY_F23  # Copilot key emits Meta+Shift+F23; F23 is the tell
+DEFAULT_VOICE = "en_US-amy-medium"
+READ_SPEED = 1.0  # Piper length_scale (1.0 = normal; >1 slower, <1 faster)
+VOICE_PRESETS = [
+    "en_US-amy-medium",
+    "en_US-ryan-medium",
+    "en_GB-alan-medium",
+    "en_GB-alba-medium",
+]
+SPEED_PRESETS = {"Slow": 1.3, "Normal": 1.0, "Fast": 0.8}
 
 # Helper for thread-safe UI updates
 class UIUpdater(QObject):
@@ -377,6 +390,15 @@ class VoiceAssistant:
             self.stream.close()
         sys.exit(exit_code)
 
+    def test_read(self, text):
+        """Speak the given text with the default voice and exit (no hotkeys/tray)."""
+        reader = SpeechReader(voice_name=DEFAULT_VOICE, speed=READ_SPEED)
+        reader.load()
+        print(f"Speaking: {text}")
+        reader.start(text)
+        reader.wait()
+        print("Done.")
+
     def test_injection(self):
         """Tests the injection logic with a dummy message."""
         self.ensure_ydotoold()
@@ -390,12 +412,16 @@ def main():
     parser = argparse.ArgumentParser(description="Local voice assistant with push-to-talk.")
     parser.add_argument("--device", type=str, help="Preferred input device name or index")
     parser.add_argument("--test-injection", action="store_true", help="Test text injection and exit")
+    parser.add_argument("--test-read", type=str, metavar="TEXT",
+                        help="Speak the given text and exit")
     args = parser.parse_args()
 
     assistant = VoiceAssistant(initial_device=args.device)
-    
+
     if args.test_injection:
         assistant.test_injection()
+    elif args.test_read:
+        assistant.test_read(args.test_read)
     else:
         assistant.run()
 
