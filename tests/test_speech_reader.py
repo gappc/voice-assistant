@@ -302,3 +302,49 @@ def test_speech_reader_stops_between_sentences(monkeypatch):
     # Sentence one should have been synthesized, but sentence two should NOT be synthesized
     # because of the early stop check in the sentence loop of _iter_chunks
     assert synthesized_sentences == ["Sentence one."]
+
+
+def test_speech_reader_on_the_fly_updates(monkeypatch):
+    from speech_reader import AudioChunk
+    import numpy as np
+    synthesized_voices_and_speeds = []
+
+    class MockEngine:
+        def __init__(self, name):
+            self.name = name
+
+        def load(self):
+            pass
+
+        def synthesize(self, text, speed):
+            synthesized_voices_and_speeds.append((self.name, speed))
+            yield AudioChunk(np.zeros(2048, dtype=np.int16), 22050)
+
+    # Mock _get_or_create_engine to return a MockEngine matching spec.model
+    r = speech_reader.SpeechReader("en_US-amy-medium")
+    monkeypatch.setattr(
+        r,
+        "_get_or_create_engine",
+        lambda spec: MockEngine(spec.model)
+    )
+
+    # Let the first chunk's playback trigger changing settings
+    def mock_play(chunks):
+        first = True
+        for samples, rate in chunks:
+            if first:
+                r.set_speed(1.5)
+                r.set_voice("de_DE-thorsten-high")
+                first = False
+
+    monkeypatch.setattr(r, "_play_chunks", mock_play)
+
+    # Read two sentences
+    r.start("Sentence one. Sentence two.")
+    r.wait()
+
+    # The first sentence should use the initial settings ("en_US-amy-medium", 1.0)
+    # The second sentence should use the updated settings ("de_DE-thorsten-high", 1.5)
+    assert len(synthesized_voices_and_speeds) == 2
+    assert synthesized_voices_and_speeds[0] == ("en_US-amy-medium", 1.0)
+    assert synthesized_voices_and_speeds[1] == ("de_DE-thorsten-high", 1.5)

@@ -452,7 +452,7 @@ class VoiceAssistant:
         group = QActionGroup(self.speed_menu)
         for label, scale in SPEED_PRESETS.items():
             action = QAction(label, self.speed_menu, checkable=True)
-            if abs(scale - READ_SPEED) < 1e-9:
+            if abs(scale - self.reader._speed) < 1e-9:
                 action.setChecked(True)
             action.triggered.connect(lambda checked, s=scale: self.reader.set_speed(s))
             self.speed_menu.addAction(action)

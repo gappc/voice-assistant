@@ -271,9 +271,9 @@ class SpeechReader:
             worker.join()
 
     def set_voice(self, name):
-        self.stop()
         self._voice_name = name
-        self.load()
+        if not self._reading:
+            self.load()
 
     def set_speed(self, length_scale):
         self._speed = length_scale
@@ -292,6 +292,9 @@ class SpeechReader:
         for sentence in sentences:
             if self._stop.is_set():
                 return
+            spec = VOICE_CATALOG.get(self._voice_name, VOICE_CATALOG[DEFAULT_VOICE])
+            self._active_engine = self._get_or_create_engine(spec)
+            self._active_engine.load()
             for chunk in self._active_engine.synthesize(sentence, self._speed):
                 if self._stop.is_set():
                     return
