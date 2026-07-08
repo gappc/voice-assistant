@@ -10,7 +10,11 @@ dependencies = [
     "numpy",
     "evdev",
     "PySide6-Essentials",
+    "piper-tts",
 ]
+
+[dependency-groups]
+dev = ["pytest"]
 
 [project.scripts]
 voice-assistant = "voice_assistant:main"

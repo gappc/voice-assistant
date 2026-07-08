@@ -37,3 +37,6 @@ ENV/
 
 # Project specific
 *.log
+
+# Local Piper voice model cache (if ever placed in-tree)
+voices/
