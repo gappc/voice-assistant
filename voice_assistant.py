@@ -68,6 +68,15 @@ class VoiceAssistant:
         self.ui_updater = UIUpdater()
         self.ui_updater.update_signal.connect(self._do_update_ui)
 
+        # Read-aloud (TTS)
+        self.output_device = None
+        self.reader = SpeechReader(
+            voice_name=DEFAULT_VOICE,
+            speed=READ_SPEED,
+            output_device=self.output_device,
+            on_state_change=self.update_ui,
+        )
+
     def record_callback(self, indata, frames, time, status):
         if status:
             print(status, file=sys.stderr)
@@ -80,11 +89,12 @@ class VoiceAssistant:
             t = np.linspace(0, duration, int(SAMPLERATE * duration), False)
             tone = np.sin(frequency * t * 2 * np.pi)
             # Ensure tone is float32 for sounddevice
-            sd.play(tone.astype(np.float32), SAMPLERATE)
+            sd.play(tone.astype(np.float32), SAMPLERATE, device=self.output_device)
         except Exception as e:
             print(f"Warning: Could not play beep: {e}")
 
     def start_recording(self, device_path):
+        self.reader.stop()  # reading yields to dictation
         with self.lock:
             if not self.is_recording:
                 self.active_recording_device = device_path
@@ -239,8 +249,38 @@ class VoiceAssistant:
                             self.start_recording(device.path)
                         elif event.value == 0: # Key up
                             self.stop_recording(device.path)
+                    elif event.code == READ_KEY_CODE and event.value == 1:
+                        self.on_read_key()
         except (OSError, Exception) as e:
             print(f"Device error or disconnected: {device.name} - {e}")
+
+    def on_read_key(self):
+        """Copilot key tapped: toggle read-aloud of the selection/clipboard."""
+        if self.reader.is_reading:
+            self.reader.stop()
+        else:
+            text = get_text_to_read()
+            if text:
+                print(f"\nReading aloud ({len(text)} chars)...")
+                self.reader.start(text)
+            else:
+                print("[read] nothing to read (empty selection and clipboard)")
+                self.play_beep(frequency=300, duration=0.15)
+
+    def get_output_devices(self):
+        """Returns a list of available output devices."""
+        devices = sd.query_devices()
+        return [
+            {"index": i, "name": d["name"]}
+            for i, d in enumerate(devices)
+            if d["max_output_channels"] > 0
+        ]
+
+    def set_output_device(self, index):
+        """Sets the output device for read-aloud playback and beeps."""
+        self.output_device = index
+        self.reader.set_output_device(index)
+        print(f"Output device set to index {index}")
 
     def ensure_ydotoold(self):
         """Ensures ydotoold is running and sets the socket environment variable."""
@@ -375,7 +415,10 @@ class VoiceAssistant:
 
         # Initialize the audio stream
         self.set_input_device(self.current_device)
-        
+
+        # Load the TTS voice (downloads on first run)
+        self.reader.load()
+
         print(f"Assistant ready! Hold Right Alt to record (with beeps).")
         
         for kb in keyboards:
