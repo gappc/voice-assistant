@@ -62,6 +62,16 @@ Test speech without the hotkey:
 uv run voice_assistant.py --test-read "Hello from the local voice assistant."
 ```
 
+## Settings
+
+Every setting you change from the tray menu — input device, output device, voice,
+reading speed, and the Ctrl+Shift+V paste-mode toggle — is remembered across
+restarts. Settings are stored as JSON in `~/.config/voice-assistant/settings.json`
+(respects `$XDG_CONFIG_HOME`). Delete the file to reset everything to defaults.
+
+`--device` on the command line overrides the saved input device for that run only;
+it does not overwrite the saved value.
+
 ## Desktop Integration
 
 To add the assistant to your app launcher so you can start it without opening a terminal:
