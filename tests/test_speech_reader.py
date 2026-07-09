@@ -270,28 +270,54 @@ def test_kokoro_engine_speed_translation(monkeypatch):
     monkeypatch.setattr(speech_reader, "ensure_kokoro_voice_files", lambda name, folder: (Path("model"), Path("voices")))
 
     # Create KokoroEngine
-    engine = speech_reader.KokoroEngine(model_name="martin", voice_id="dm_martin", lang="de", voices_dir=Path("/dummy"))
+    engine = speech_reader.KokoroEngine(model_name="martin", voices_dir=Path("/dummy"))
     engine.load()
 
     # Normal speed (reciprocal of 1.0 is 1.0)
-    list(engine.synthesize("test", 1.0))
+    list(engine.synthesize("test", 1.0, "martin", "de"))
     assert engine._kokoro.created_calls[-1][2] == 1.0
 
     # Slow speed (reciprocal of 1.3 is ~0.769)
-    list(engine.synthesize("test", 1.3))
+    list(engine.synthesize("test", 1.3, "martin", "de"))
     assert abs(engine._kokoro.created_calls[-1][2] - 1.0 / 1.3) < 1e-5
 
     # Fast speed (reciprocal of 0.8 is 1.25)
-    list(engine.synthesize("test", 0.8))
+    list(engine.synthesize("test", 0.8, "martin", "de"))
     assert engine._kokoro.created_calls[-1][2] == 1.25
 
     # Extreme slow (Piper length_scale 3.0 -> reciprocal 0.33 -> clamped to 0.5)
-    list(engine.synthesize("test", 3.0))
+    list(engine.synthesize("test", 3.0, "martin", "de"))
     assert engine._kokoro.created_calls[-1][2] == 0.5
 
     # Extreme fast (Piper length_scale 0.2 -> reciprocal 5.0 -> clamped to 2.0)
-    list(engine.synthesize("test", 0.2))
+    list(engine.synthesize("test", 0.2, "martin", "de"))
     assert engine._kokoro.created_calls[-1][2] == 2.0
+
+
+def test_voices_sharing_a_model_do_not_share_a_voice_id(monkeypatch):
+    """kokoro-en-bella and kokoro-en-sarah share model='official'. They must
+    share the ONNX session but NOT the voice_id."""
+    import numpy as np
+
+    used = []
+
+    class FakeKokoro:
+        def create(self, text, voice, speed, lang):
+            used.append((voice, lang))
+            return np.zeros(10, dtype=np.float32), 24000
+
+    monkeypatch.setattr(speech_reader, "build_kokoro", lambda model, voices: FakeKokoro())
+    monkeypatch.setattr(
+        speech_reader, "ensure_kokoro_voice_files",
+        lambda name, folder: (Path("model"), Path("voices")),
+    )
+
+    r = speech_reader.SpeechReader("kokoro-en-bella")
+    r._synth_sentence("hello", "kokoro-en-bella", 1.0)
+    r._synth_sentence("hello", "kokoro-en-sarah", 1.0)
+
+    assert used == [("af_bella", "en-us"), ("af_sarah", "en-us")]
+    assert len(r._engines) == 1  # one ONNX session, not two
 
 
 def test_speech_reader_stops_between_sentences(monkeypatch):
@@ -304,7 +330,7 @@ def test_speech_reader_stops_between_sentences(monkeypatch):
         def load(self):
             pass
 
-        def synthesize(self, text, speed):
+        def synthesize(self, text, speed, voice_id=None, lang=None):
             with lock:
                 synthesized_sentences.append(text)
             yield AudioChunk(np.zeros(2048, dtype=np.int16), 22050)
@@ -344,7 +370,7 @@ def test_prefetch_synthesizes_next_sentence_during_playback(monkeypatch):
         def load(self):
             pass
 
-        def synthesize(self, text, speed):
+        def synthesize(self, text, speed, voice_id=None, lang=None):
             if text == "Two.":
                 second_synthesized.set()
             yield AudioChunk(np.zeros(2048, dtype=np.int16), 22050)
@@ -384,7 +410,7 @@ def test_speech_reader_on_the_fly_updates(monkeypatch):
         def load(self):
             pass
 
-        def synthesize(self, text, speed):
+        def synthesize(self, text, speed, voice_id=None, lang=None):
             with lock:
                 synthesized.append((self.name, text, speed))
             if text == "Sentence two.":

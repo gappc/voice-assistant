@@ -161,7 +161,9 @@ class TTSEngine(Protocol):
         """Load model weights. Called once at startup or on voice switch."""
         ...
 
-    def synthesize(self, text: str, speed: float) -> Iterator[AudioChunk]:
+    def synthesize(
+        self, text: str, speed: float, voice_id: str | None, lang: str | None
+    ) -> Iterator[AudioChunk]:
         """Synthesize `text` (already segmented to sentence granularity by the
         caller), yielding one or more audio chunks as they become available."""
         ...
@@ -179,7 +181,9 @@ class PiperEngine:
             print(f"[read] loading Piper voice '{self.voice_name}' ...")
             self.voice = PiperVoice.load(str(onnx_path))
 
-    def synthesize(self, text: str, speed: float) -> Iterator[AudioChunk]:
+    def synthesize(
+        self, text: str, speed: float, voice_id: str | None = None, lang: str | None = None
+    ) -> Iterator[AudioChunk]:
         self.load()
         syn_config = SynthesisConfig(length_scale=speed)
         for chunk in self.voice.synthesize(text, syn_config=syn_config):
@@ -188,29 +192,32 @@ class PiperEngine:
 
 
 class KokoroEngine:
-    def __init__(self, model_name: str, voice_id: str, lang: str, voices_dir: Path):
+    """Owns one Kokoro ONNX session. Voice and language are per-call arguments,
+    because many voices are served by the same model file."""
+
+    def __init__(self, model_name: str, voices_dir: Path):
         self.model_name = model_name
-        self.voice_id = voice_id
-        self.lang = lang
         self.voices_dir = voices_dir
         self._kokoro = None
 
     def load(self) -> None:
         if self._kokoro is None:
             model_path, voices_path = ensure_kokoro_voice_files(self.model_name, self.voices_dir)
-            print(f"[read] loading Kokoro voice '{self.model_name}' ...")
+            print(f"[read] loading Kokoro model '{self.model_name}' ...")
             self._kokoro = build_kokoro(model_path, voices_path)
 
-    def synthesize(self, text: str, speed: float) -> Iterator[AudioChunk]:
+    def synthesize(
+        self, text: str, speed: float, voice_id: str | None = None, lang: str | None = None
+    ) -> Iterator[AudioChunk]:
         self.load()
         # Convert Piper's length_scale speed to Kokoro speed (reciprocal)
         kokoro_speed = 1.0 / speed
         kokoro_speed = max(0.5, min(kokoro_speed, 2.0))
         float32_samples, sample_rate = self._kokoro.create(
             text,
-            voice=self.voice_id,
+            voice=voice_id,
             speed=kokoro_speed,
-            lang=self.lang,
+            lang=lang,
         )
         clamped = np.clip(float32_samples, -1.0, 1.0)
         int16_samples = (clamped * 32767.0).astype(np.int16)
@@ -261,9 +268,7 @@ class SpeechReader:
                 if spec.engine == "piper":
                     self._engines[engine_key] = PiperEngine(spec.model, self._voices_dir)
                 elif spec.engine == "kokoro":
-                    self._engines[engine_key] = KokoroEngine(
-                        spec.model, spec.voice_id, spec.lang, self._voices_dir
-                    )
+                    self._engines[engine_key] = KokoroEngine(spec.model, self._voices_dir)
                 else:
                     raise ValueError(f"Unknown engine: {spec.engine}")
             return self._engines[engine_key]
@@ -339,7 +344,10 @@ class SpeechReader:
         engine = self._get_or_create_engine(spec)
         engine.load()
         self._active_engine = engine
-        return [(c.samples, c.sample_rate) for c in engine.synthesize(sentence, speed)]
+        return [
+            (c.samples, c.sample_rate)
+            for c in engine.synthesize(sentence, speed, spec.voice_id, spec.lang)
+        ]
 
     def _iter_chunks(self, text):
         """Yield (int16 samples, sample_rate), synthesizing one sentence ahead.
