@@ -94,3 +94,8 @@ You can then search for "Voice Assistant" in your application menu, or add it to
     - **Permissions**: Ensure your user is in the `input` group and has access to `/dev/uinput`.
 - **Wrong Key Detected**: If your keyboard isn't being picked up (e.g., you suspected `/dev/input/event16`), the script automatically finds all keyboards. You can verify which one is being used in the terminal output at startup.
 - **Microphone issues**: Check your default input device in your GNOME/desktop sound settings.
+
+---
+
+> [!NOTE]
+> This entire project was **vibe coded**. ✨
