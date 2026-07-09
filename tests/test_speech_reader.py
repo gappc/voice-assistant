@@ -18,36 +18,6 @@ def test_default_voices_dir_falls_back_to_home(monkeypatch):
     )
 
 
-def test_ensure_voice_model_downloads_when_missing(monkeypatch, tmp_path):
-    calls = []
-
-    def fake_run(args, **kwargs):
-        calls.append(args)
-        # Simulate the download producing the model file.
-        (tmp_path / "en_US-amy-medium.onnx").write_text("model")
-
-    monkeypatch.setattr(speech_reader.subprocess, "run", fake_run)
-    path = speech_reader.ensure_voice_model("en_US-amy-medium", tmp_path)
-
-    assert path == tmp_path / "en_US-amy-medium.onnx"
-    assert path.exists()
-    assert len(calls) == 1
-    assert "piper.download_voices" in calls[0]
-    assert "en_US-amy-medium" in calls[0]
-    assert str(tmp_path) in calls[0]
-
-
-def test_ensure_voice_model_skips_download_when_present(monkeypatch, tmp_path):
-    (tmp_path / "en_US-amy-medium.onnx").write_text("already here")
-
-    def fail_run(args, **kwargs):
-        raise AssertionError("should not download when model exists")
-
-    monkeypatch.setattr(speech_reader.subprocess, "run", fail_run)
-    path = speech_reader.ensure_voice_model("en_US-amy-medium", tmp_path)
-    assert path == tmp_path / "en_US-amy-medium.onnx"
-
-
 from types import SimpleNamespace
 
 import numpy as np
@@ -137,7 +107,7 @@ def test_play_chunks_stops_early_when_flag_set(monkeypatch):
 def test_start_then_wait_resets_state_and_notifies(monkeypatch):
     states = []
     r = speech_reader.SpeechReader(
-        "en_US-amy-medium", on_state_change=lambda: states.append(True)
+        "en_US-bella", on_state_change=lambda: states.append(True)
     )
     # Replace real synthesis/playback with instant no-ops.
     monkeypatch.setattr(r, "_iter_chunks", lambda text: iter([]))
@@ -294,16 +264,34 @@ def test_kokoro_engine_speed_translation(monkeypatch):
     assert engine._kokoro.created_calls[-1][2] == 2.0
 
 
-def test_voices_sharing_a_model_do_not_share_a_voice_id(monkeypatch):
-    """kokoro-en-bella and kokoro-en-sarah share model='official'. They must
-    share the ONNX session but NOT the voice_id."""
-    import numpy as np
+def test_catalog_is_kokoro_only():
+    assert speech_reader.DEFAULT_VOICE == "en_US-bella"
+    assert set(speech_reader.VOICE_CATALOG) == {
+        "en_US-bella", "en_US-sarah", "en_US-michael",
+        "en_GB-george", "en_GB-emma", "de_DE-martin",
+    }
+    assert not hasattr(speech_reader, "PiperEngine")
+    assert not hasattr(speech_reader, "TTSEngine")
+    assert not hasattr(speech_reader, "ensure_voice_model")
 
-    used = []
+    # Every English voice rides the one shared 'official' model.
+    official = [s for s in speech_reader.VOICE_CATALOG.values() if s.model == "official"]
+    assert len(official) == 5
+    assert {s.voice_id for s in official} == {
+        "af_bella", "af_sarah", "am_michael", "bm_george", "bf_emma",
+    }
+    assert speech_reader.VOICE_CATALOG["en_GB-george"].lang == "en-gb"
+    assert speech_reader.VOICE_CATALOG["de_DE-martin"] == speech_reader.VoiceSpec(
+        "martin", "martin", "de"
+    )
+
+
+def test_engine_cache_is_keyed_on_model(monkeypatch):
+    """Five voices, one 'official' ONNX session."""
+    import numpy as np
 
     class FakeKokoro:
         def create(self, text, voice, speed, lang):
-            used.append((voice, lang))
             return np.zeros(10, dtype=np.float32), 24000
 
     monkeypatch.setattr(speech_reader, "build_kokoro", lambda model, voices: FakeKokoro())
@@ -312,12 +300,11 @@ def test_voices_sharing_a_model_do_not_share_a_voice_id(monkeypatch):
         lambda name, folder: (Path("model"), Path("voices")),
     )
 
-    r = speech_reader.SpeechReader("kokoro-en-bella")
-    r._synth_sentence("hello", "kokoro-en-bella", 1.0)
-    r._synth_sentence("hello", "kokoro-en-sarah", 1.0)
+    r = speech_reader.SpeechReader("en_US-bella")
+    for name in ("en_US-bella", "en_US-sarah", "en_GB-george", "de_DE-martin"):
+        r._synth_sentence("hello", name, 1.0)
 
-    assert used == [("af_bella", "en-us"), ("af_sarah", "en-us")]
-    assert len(r._engines) == 1  # one ONNX session, not two
+    assert set(r._engines) == {"official", "martin"}
 
 
 def test_speech_reader_stops_between_sentences(monkeypatch):
@@ -335,7 +322,7 @@ def test_speech_reader_stops_between_sentences(monkeypatch):
                 synthesized_sentences.append(text)
             yield AudioChunk(np.zeros(2048, dtype=np.int16), 22050)
 
-    r = speech_reader.SpeechReader("en_US-amy-medium")
+    r = speech_reader.SpeechReader("en_US-bella")
     mock_engine = MockEngine()
     monkeypatch.setattr(r, "_get_or_create_engine", lambda spec: mock_engine)
 
@@ -375,7 +362,7 @@ def test_prefetch_synthesizes_next_sentence_during_playback(monkeypatch):
                 second_synthesized.set()
             yield AudioChunk(np.zeros(2048, dtype=np.int16), 22050)
 
-    r = speech_reader.SpeechReader("en_US-amy-medium")
+    r = speech_reader.SpeechReader("en_US-bella")
     monkeypatch.setattr(r, "_get_or_create_engine", lambda spec: MockEngine())
 
     overlapped = []
@@ -404,21 +391,18 @@ def test_speech_reader_on_the_fly_updates(monkeypatch):
     second_prefetched = threading.Event()
 
     class MockEngine:
-        def __init__(self, name):
-            self.name = name
-
         def load(self):
             pass
 
         def synthesize(self, text, speed, voice_id=None, lang=None):
             with lock:
-                synthesized.append((self.name, text, speed))
+                synthesized.append((voice_id, text, speed))
             if text == "Sentence two.":
                 second_prefetched.set()
             yield AudioChunk(np.zeros(2048, dtype=np.int16), 22050)
 
-    r = speech_reader.SpeechReader("en_US-amy-medium")
-    monkeypatch.setattr(r, "_get_or_create_engine", lambda spec: MockEngine(spec.model))
+    r = speech_reader.SpeechReader("en_US-bella")
+    monkeypatch.setattr(r, "_get_or_create_engine", lambda spec: MockEngine())
 
     def mock_play(chunks):
         for i, (samples, rate) in enumerate(chunks):
@@ -427,7 +411,7 @@ def test_speech_reader_on_the_fly_updates(monkeypatch):
                 # settings, then change them: the stale audio must be redone.
                 assert second_prefetched.wait(timeout=5)
                 r.set_speed(1.5)
-                r.set_voice("de_DE-thorsten-high")
+                r.set_voice("de_DE-martin")
 
     monkeypatch.setattr(r, "_play_chunks", mock_play)
 
@@ -439,7 +423,7 @@ def test_speech_reader_on_the_fly_updates(monkeypatch):
 
     # Sentence one used the initial settings; sentence two was prefetched under
     # them, discarded, and re-synthesized with the updated voice and speed.
-    assert calls[0] == ("en_US-amy-medium", "Sentence one.", 1.0)
-    assert calls[1] == ("en_US-amy-medium", "Sentence two.", 1.0)
-    assert calls[2] == ("de_DE-thorsten-high", "Sentence two.", 1.5)
+    assert calls[0] == ("af_bella", "Sentence one.", 1.0)
+    assert calls[1] == ("af_bella", "Sentence two.", 1.0)
+    assert calls[2] == ("martin", "Sentence two.", 1.5)
     assert len(calls) == 3

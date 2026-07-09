@@ -1,4 +1,4 @@
-"""Local text-to-speech ("read aloud") via Piper and Kokoro.
+"""Local text-to-speech ("read aloud") via Kokoro.
 
 Self-contained: knows nothing about evdev or the tray. The owning app fetches
 text elsewhere and drives this via start()/stop()/toggle().
@@ -7,47 +7,24 @@ text elsewhere and drives this via start()/stop()/toggle().
 import os
 import queue
 import re
-import subprocess
 import sys
 import threading
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterator, NamedTuple, Protocol
+from typing import Iterator, NamedTuple
 
 import numpy as np
 import onnxruntime as ort
 import sounddevice as sd
-from piper import PiperVoice, SynthesisConfig
 
 
 def default_voices_dir():
-    """Directory where Piper/Kokoro voice models are cached (XDG data dir)."""
+    """Directory where Kokoro voice models are cached (XDG data dir)."""
     base = os.environ.get("XDG_DATA_HOME") or os.path.join(
         os.path.expanduser("~"), ".local", "share"
     )
     return Path(base) / "voice-assistant" / "voices"
-
-
-def ensure_voice_model(name, voices_dir):
-    """Return the path to <name>.onnx, downloading it only if missing."""
-    voices_dir = Path(voices_dir)
-    voices_dir.mkdir(parents=True, exist_ok=True)
-    onnx_path = voices_dir / f"{name}.onnx"
-    if not onnx_path.exists():
-        print(f"[read] downloading voice '{name}' to {voices_dir} ...")
-        subprocess.run(
-            [
-                sys.executable,
-                "-m",
-                "piper.download_voices",
-                name,
-                "--data-dir",
-                str(voices_dir),
-            ],
-            check=True,
-        )
-    return onnx_path
 
 
 # --- Kokoro voice provisioning -----------------------------------------
@@ -125,70 +102,28 @@ def split_sentences(text: str) -> list[str]:
 
 @dataclass(frozen=True)
 class VoiceSpec:
-    engine: str  # "piper" | "kokoro"
-    model: str   # piper voice name, or kokoro model identifier (e.g. "martin")
-    voice_id: str | None = None  # kokoro-only: key into the voices npz (e.g. "dm_martin")
-    lang: str | None = None      # kokoro-only: passed to create(text, lang=...)
+    model: str     # which Kokoro ONNX file to load: "official" | "martin"
+    voice_id: str  # key into that model's voice pack
+    lang: str      # passed to Kokoro.create(lang=...)
 
 
 VOICE_CATALOG = {
-    "en_US-amy-medium":    VoiceSpec(engine="piper", model="en_US-amy-medium"),
-    "en_US-ryan-medium":   VoiceSpec(engine="piper", model="en_US-ryan-medium"),
-    "en_GB-alan-medium":   VoiceSpec(engine="piper", model="en_GB-alan-medium"),
-    "en_GB-alba-medium":   VoiceSpec(engine="piper", model="en_GB-alba-medium"),
-    "de_DE-thorsten-high": VoiceSpec(engine="piper", model="de_DE-thorsten-high"),
-    "de_DE-mls-medium":    VoiceSpec(engine="piper", model="de_DE-mls-medium"),
-    "kokoro-de-martin":    VoiceSpec(engine="kokoro", model="martin",
-                                      voice_id="martin", lang="de"),
-    "kokoro-en-bella":     VoiceSpec(engine="kokoro", model="official",
-                                      voice_id="af_bella", lang="en-us"),
-    "kokoro-en-sarah":     VoiceSpec(engine="kokoro", model="official",
-                                      voice_id="af_sarah", lang="en-us"),
+    "en_US-bella":   VoiceSpec("official", "af_bella",   "en-us"),
+    "en_US-sarah":   VoiceSpec("official", "af_sarah",   "en-us"),
+    "en_US-michael": VoiceSpec("official", "am_michael", "en-us"),
+    "en_GB-george":  VoiceSpec("official", "bm_george",  "en-gb"),
+    "en_GB-emma":    VoiceSpec("official", "bf_emma",    "en-gb"),
+    "de_DE-martin":  VoiceSpec("martin",   "martin",     "de"),
 }
 
-DEFAULT_VOICE = "en_US-amy-medium"
+DEFAULT_VOICE = "en_US-bella"
 
 
-# --- TTSEngine Abstraction ---------------------------------------------
+# --- Audio chunks and the Kokoro engine --------------------------------
 
 class AudioChunk(NamedTuple):
     samples: np.ndarray  # mono int16 PCM
     sample_rate: int
-
-
-class TTSEngine(Protocol):
-    def load(self) -> None:
-        """Load model weights. Called once at startup or on voice switch."""
-        ...
-
-    def synthesize(
-        self, text: str, speed: float, voice_id: str | None, lang: str | None
-    ) -> Iterator[AudioChunk]:
-        """Synthesize `text` (already segmented to sentence granularity by the
-        caller), yielding one or more audio chunks as they become available."""
-        ...
-
-
-class PiperEngine:
-    def __init__(self, voice_name: str, voices_dir: Path):
-        self.voice_name = voice_name
-        self.voices_dir = voices_dir
-        self.voice = None
-
-    def load(self) -> None:
-        if self.voice is None:
-            onnx_path = ensure_voice_model(self.voice_name, self.voices_dir)
-            print(f"[read] loading Piper voice '{self.voice_name}' ...")
-            self.voice = PiperVoice.load(str(onnx_path))
-
-    def synthesize(
-        self, text: str, speed: float, voice_id: str | None = None, lang: str | None = None
-    ) -> Iterator[AudioChunk]:
-        self.load()
-        syn_config = SynthesisConfig(length_scale=speed)
-        for chunk in self.voice.synthesize(text, syn_config=syn_config):
-            samples = np.frombuffer(chunk.audio_int16_bytes, dtype=np.int16)
-            yield AudioChunk(samples, chunk.sample_rate)
 
 
 class KokoroEngine:
@@ -206,9 +141,7 @@ class KokoroEngine:
             print(f"[read] loading Kokoro model '{self.model_name}' ...")
             self._kokoro = build_kokoro(model_path, voices_path)
 
-    def synthesize(
-        self, text: str, speed: float, voice_id: str | None = None, lang: str | None = None
-    ) -> Iterator[AudioChunk]:
+    def synthesize(self, text: str, speed: float, voice_id: str, lang: str) -> Iterator[AudioChunk]:
         self.load()
         # Convert Piper's length_scale speed to Kokoro speed (reciprocal)
         kokoro_speed = 1.0 / speed
@@ -225,7 +158,7 @@ class KokoroEngine:
 
 
 class SpeechReader:
-    """Reads text aloud with Piper or Kokoro, streaming per sentence for prompt stop."""
+    """Reads text aloud with Kokoro, streaming per sentence for prompt stop."""
 
     BLOCK = 2048  # frames per write; bounds stop latency to a fraction of a second
     PREFETCH = 1  # sentences synthesized ahead of playback
@@ -261,17 +194,11 @@ class SpeechReader:
         self._active_engine = self._get_or_create_engine(spec)
         self._active_engine.load()
 
-    def _get_or_create_engine(self, spec: VoiceSpec) -> TTSEngine:
-        engine_key = (spec.engine, spec.model)
+    def _get_or_create_engine(self, spec: VoiceSpec) -> KokoroEngine:
         with self._engines_lock:  # the prefetch thread creates engines too
-            if engine_key not in self._engines:
-                if spec.engine == "piper":
-                    self._engines[engine_key] = PiperEngine(spec.model, self._voices_dir)
-                elif spec.engine == "kokoro":
-                    self._engines[engine_key] = KokoroEngine(spec.model, self._voices_dir)
-                else:
-                    raise ValueError(f"Unknown engine: {spec.engine}")
-            return self._engines[engine_key]
+            if spec.model not in self._engines:
+                self._engines[spec.model] = KokoroEngine(spec.model, self._voices_dir)
+            return self._engines[spec.model]
 
     @property
     def is_reading(self):
