@@ -2,14 +2,11 @@ import sys
 import types
 
 # Stub heavy/hardware modules so importing voice_assistant is cheap and safe.
-for name in ["faster_whisper", "piper", "evdev"]:
+for name in ["faster_whisper", "evdev"]:
     sys.modules.setdefault(name, types.ModuleType(name))
 
 # Minimal attributes the module accesses at import time.
 sys.modules["faster_whisper"].WhisperModel = object
-_piper = sys.modules["piper"]
-_piper.PiperVoice = object
-_piper.SynthesisConfig = object
 _evdev = sys.modules["evdev"]
 _evdev.InputDevice = object
 _evdev.categorize = lambda e: e
@@ -35,3 +32,12 @@ def test_get_output_devices_filters_by_output_channels(monkeypatch):
         {"index": 1, "name": "Speakers"},
         {"index": 2, "name": "Headset"},
     ]
+
+
+def test_piper_is_not_a_dependency():
+    """piper-tts must be absent from the environment, not merely unimported."""
+    import importlib.metadata as md
+    import pytest
+
+    with pytest.raises(md.PackageNotFoundError):
+        md.version("piper-tts")

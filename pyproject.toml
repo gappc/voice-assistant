@@ -10,8 +10,8 @@ dependencies = [
     "numpy",
     "evdev",
     "PySide6-Essentials",
-    "piper-tts",
     "kokoro-onnx",
+    "onnxruntime",
 ]
 
 [dependency-groups]
