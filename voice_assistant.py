@@ -6,6 +6,9 @@ import threading
 import queue
 import signal
 import argparse
+from pathlib import Path
+from typing import NamedTuple
+
 import numpy as np
 import sounddevice as sd
 from faster_whisper import WhisperModel
@@ -14,6 +17,7 @@ from PySide6.QtGui import QIcon, QAction, QCursor, QPixmap, QPainter, QColor, QB
 from PySide6.QtCore import QTimer, Qt, Signal, QObject, Slot
 from evdev import InputDevice, categorize, ecodes, list_devices
 
+import tray_settings
 from speech_reader import SpeechReader, VOICE_CATALOG, DEFAULT_VOICE
 from text_source import get_text_to_read
 
@@ -58,12 +62,37 @@ def _device_name(index, devices):
     return None
 
 
+class _StartupSettings(NamedTuple):
+    input_device: str | None
+    output_device: str | None  # unresolved name; resolved via _resolve_device + get_output_devices()
+    voice: str
+    speed: float
+    paste_with_shift: bool
+
+
+def _resolve_startup_settings(initial_device, settings_path):
+    """Merge a CLI-provided initial_device with saved tray settings. The CLI
+    value wins when given; otherwise the saved value is used, falling back to
+    the hardcoded default. Never returns a voice absent from VOICE_CATALOG."""
+    settings = tray_settings.load(settings_path)
+    voice = settings.voice if settings.voice in VOICE_CATALOG else DEFAULT_VOICE
+    speed = settings.speed if settings.speed is not None else READ_SPEED
+    input_device = initial_device if initial_device is not None else settings.input_device
+    return _StartupSettings(
+        input_device=input_device,
+        output_device=settings.output_device,
+        voice=voice,
+        speed=speed,
+        paste_with_shift=settings.paste_with_shift,
+    )
+
+
 # Helper for thread-safe UI updates
 class UIUpdater(QObject):
     update_signal = Signal()
 
 class VoiceAssistant:
-    def __init__(self, initial_device=None):
+    def __init__(self, initial_device=None, settings_path=None):
         print(f"Loading Whisper model '{MODEL_SIZE}'...")
         self.model = WhisperModel(MODEL_SIZE, device=DEVICE, compute_type=COMPUTE_TYPE)
         self.is_recording = False
@@ -71,17 +100,22 @@ class VoiceAssistant:
         self.transcription_queue = queue.Queue()
         self.worker_thread = threading.Thread(target=self._transcription_worker, daemon=True)
         self.worker_thread.start()
-        
+
         self.lock = threading.Lock()
         # Track active recording to prevent duplicate starts from multiple devices
         self.active_recording_device = None
         self.running = True
         self.window = None
         self.stream = None
-        self.current_device = initial_device
+
+        self._settings_path = (
+            Path(settings_path) if settings_path else tray_settings.default_config_dir() / "settings.json"
+        )
+        startup = _resolve_startup_settings(initial_device, self._settings_path)
+        self.current_device = startup.input_device
         # Ctrl+Shift+V works in terminals and most editors; flip off for apps
         # that reserve it (e.g. LibreOffice "Paste Special").
-        self.paste_with_shift = True
+        self.paste_with_shift = startup.paste_with_shift
 
         # Setup signal handlers
         signal.signal(signal.SIGINT, self.handle_signal)
@@ -91,10 +125,10 @@ class VoiceAssistant:
         self.ui_updater.update_signal.connect(self._do_update_ui)
 
         # Read-aloud (TTS)
-        self.output_device = None
+        self.output_device = _resolve_device(startup.output_device, self.get_output_devices())
         self.reader = SpeechReader(
-            voice_name=DEFAULT_VOICE,
-            speed=READ_SPEED,
+            voice_name=startup.voice,
+            speed=startup.speed,
             output_device=self.output_device,
             on_state_change=self.update_ui,
         )

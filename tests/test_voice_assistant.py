@@ -83,3 +83,40 @@ def test_piper_is_not_a_dependency():
 
     with pytest.raises(md.PackageNotFoundError):
         md.version("piper-tts")
+
+
+def test_resolve_startup_settings_cli_device_overrides_saved(tmp_path):
+    path = tmp_path / "settings.json"
+    voice_assistant.tray_settings.save(
+        voice_assistant.tray_settings.TraySettings(input_device="Saved Mic"), path
+    )
+    result = voice_assistant._resolve_startup_settings("CLI Mic", path)
+    assert result.input_device == "CLI Mic"
+
+
+def test_resolve_startup_settings_falls_back_to_saved_device(tmp_path):
+    path = tmp_path / "settings.json"
+    voice_assistant.tray_settings.save(
+        voice_assistant.tray_settings.TraySettings(input_device="Saved Mic"), path
+    )
+    result = voice_assistant._resolve_startup_settings(None, path)
+    assert result.input_device == "Saved Mic"
+
+
+def test_resolve_startup_settings_unknown_voice_falls_back_to_default(tmp_path):
+    path = tmp_path / "settings.json"
+    voice_assistant.tray_settings.save(
+        voice_assistant.tray_settings.TraySettings(voice="no-longer-exists"), path
+    )
+    result = voice_assistant._resolve_startup_settings(None, path)
+    assert result.voice == voice_assistant.DEFAULT_VOICE
+
+
+def test_resolve_startup_settings_defaults_when_nothing_saved(tmp_path):
+    path = tmp_path / "settings.json"  # never written
+    result = voice_assistant._resolve_startup_settings(None, path)
+    assert result.input_device is None
+    assert result.output_device is None
+    assert result.voice == voice_assistant.DEFAULT_VOICE
+    assert result.speed == voice_assistant.READ_SPEED
+    assert result.paste_with_shift is True
