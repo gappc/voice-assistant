@@ -222,23 +222,49 @@ def test_ensure_kokoro_voice_files_skips_when_present(monkeypatch, tmp_path):
     assert voices_path == kokoro_dir / "test.npz"
 
 
+def test_build_kokoro_bounds_threads_and_disables_spinning(monkeypatch):
+    import kokoro_onnx
+
+    captured = {}
+
+    def fake_session(path, sess_options, providers):
+        captured["path"] = path
+        captured["opts"] = sess_options
+        captured["providers"] = providers
+        return object()
+
+    monkeypatch.setattr(speech_reader.ort, "InferenceSession", fake_session)
+    monkeypatch.setattr(
+        kokoro_onnx.Kokoro, "from_session",
+        classmethod(lambda cls, session, voices: ("kokoro", session, voices)),
+    )
+
+    result = speech_reader.build_kokoro(Path("m.onnx"), Path("v.bin"))
+
+    assert result[0] == "kokoro"
+    assert result[2] == "v.bin"
+    assert captured["path"] == "m.onnx"
+    assert captured["providers"] == ["CPUExecutionProvider"]
+    opts = captured["opts"]
+    assert opts.intra_op_num_threads == speech_reader.KOKORO_INTRA_OP_THREADS
+    assert opts.inter_op_num_threads == 1
+    # ORT exposes no getter for config entries in every build; check when it does.
+    if hasattr(opts, "get_session_config_entry"):
+        assert opts.get_session_config_entry("session.intra_op.allow_spinning") == "0"
+
+
 def test_kokoro_engine_speed_translation(monkeypatch):
-    import sys
-    import types
     import numpy as np
 
     class FakeKokoro:
-        def __init__(self, model_path, voices_path):
+        def __init__(self):
             self.created_calls = []
 
         def create(self, text, voice, speed, lang):
             self.created_calls.append((text, voice, speed, lang))
             return np.zeros(10, dtype=np.float32), 24000
 
-    # Inject mock Kokoro class
-    monkeypatch.setitem(sys.modules, "kokoro_onnx", types.ModuleType("kokoro_onnx"))
-    import kokoro_onnx
-    kokoro_onnx.Kokoro = FakeKokoro
+    monkeypatch.setattr(speech_reader, "build_kokoro", lambda model, voices: FakeKokoro())
 
     # Avoid downloading files
     monkeypatch.setattr(speech_reader, "ensure_kokoro_voice_files", lambda name, folder: (Path("model"), Path("voices")))
@@ -272,42 +298,84 @@ def test_speech_reader_stops_between_sentences(monkeypatch):
     from speech_reader import AudioChunk
     import numpy as np
     synthesized_sentences = []
+    lock = __import__("threading").Lock()
 
     class MockEngine:
         def load(self):
             pass
 
         def synthesize(self, text, speed):
-            synthesized_sentences.append(text)
+            with lock:
+                synthesized_sentences.append(text)
             yield AudioChunk(np.zeros(2048, dtype=np.int16), 22050)
 
     r = speech_reader.SpeechReader("en_US-amy-medium")
-    # Set the active engine to MockEngine directly
     mock_engine = MockEngine()
     monkeypatch.setattr(r, "_get_or_create_engine", lambda spec: mock_engine)
 
     # Let _play_chunks stop the reader immediately when it plays the first chunk
     def mock_play(chunks):
-        # We consume one chunk, then trigger a stop on the reader
         for samples, rate in chunks:
             r.stop()  # set the stop event
             break
 
     monkeypatch.setattr(r, "_play_chunks", mock_play)
 
-    # We start with a multi-sentence text
-    r.start("Sentence one. Sentence two.")
+    r.start("Sentence one. Sentence two. Sentence three.")
     r.wait()
 
-    # Sentence one should have been synthesized, but sentence two should NOT be synthesized
-    # because of the early stop check in the sentence loop of _iter_chunks
-    assert synthesized_sentences == ["Sentence one."]
+    # Playback stops at the first sentence. Prefetch may have speculatively
+    # synthesized exactly one sentence ahead, but never two.
+    with lock:
+        assert synthesized_sentences[0] == "Sentence one."
+        assert "Sentence three." not in synthesized_sentences
+        assert len(synthesized_sentences) <= 2
+
+
+def test_prefetch_synthesizes_next_sentence_during_playback(monkeypatch):
+    import threading
+
+    from speech_reader import AudioChunk
+    import numpy as np
+
+    second_synthesized = threading.Event()
+
+    class MockEngine:
+        def load(self):
+            pass
+
+        def synthesize(self, text, speed):
+            if text == "Two.":
+                second_synthesized.set()
+            yield AudioChunk(np.zeros(2048, dtype=np.int16), 22050)
+
+    r = speech_reader.SpeechReader("en_US-amy-medium")
+    monkeypatch.setattr(r, "_get_or_create_engine", lambda spec: MockEngine())
+
+    overlapped = []
+
+    def mock_play(chunks):
+        for i, (samples, rate) in enumerate(chunks):
+            if i == 0:
+                # While the first sentence is "playing", the second must already
+                # be under synthesis on the producer thread.
+                overlapped.append(second_synthesized.wait(timeout=5))
+
+    monkeypatch.setattr(r, "_play_chunks", mock_play)
+    r.start("One. Two.")
+    r.wait()
+
+    assert overlapped == [True]
 
 
 def test_speech_reader_on_the_fly_updates(monkeypatch):
+    import threading
+
     from speech_reader import AudioChunk
     import numpy as np
-    synthesized_voices_and_speeds = []
+    synthesized = []
+    lock = threading.Lock()
+    second_prefetched = threading.Event()
 
     class MockEngine:
         def __init__(self, name):
@@ -317,34 +385,35 @@ def test_speech_reader_on_the_fly_updates(monkeypatch):
             pass
 
         def synthesize(self, text, speed):
-            synthesized_voices_and_speeds.append((self.name, speed))
+            with lock:
+                synthesized.append((self.name, text, speed))
+            if text == "Sentence two.":
+                second_prefetched.set()
             yield AudioChunk(np.zeros(2048, dtype=np.int16), 22050)
 
-    # Mock _get_or_create_engine to return a MockEngine matching spec.model
     r = speech_reader.SpeechReader("en_US-amy-medium")
-    monkeypatch.setattr(
-        r,
-        "_get_or_create_engine",
-        lambda spec: MockEngine(spec.model)
-    )
+    monkeypatch.setattr(r, "_get_or_create_engine", lambda spec: MockEngine(spec.model))
 
-    # Let the first chunk's playback trigger changing settings
     def mock_play(chunks):
-        first = True
-        for samples, rate in chunks:
-            if first:
+        for i, (samples, rate) in enumerate(chunks):
+            if i == 0:
+                # Wait until sentence two has been prefetched under the OLD
+                # settings, then change them: the stale audio must be redone.
+                assert second_prefetched.wait(timeout=5)
                 r.set_speed(1.5)
                 r.set_voice("de_DE-thorsten-high")
-                first = False
 
     monkeypatch.setattr(r, "_play_chunks", mock_play)
 
-    # Read two sentences
     r.start("Sentence one. Sentence two.")
     r.wait()
 
-    # The first sentence should use the initial settings ("en_US-amy-medium", 1.0)
-    # The second sentence should use the updated settings ("de_DE-thorsten-high", 1.5)
-    assert len(synthesized_voices_and_speeds) == 2
-    assert synthesized_voices_and_speeds[0] == ("en_US-amy-medium", 1.0)
-    assert synthesized_voices_and_speeds[1] == ("de_DE-thorsten-high", 1.5)
+    with lock:
+        calls = list(synthesized)
+
+    # Sentence one used the initial settings; sentence two was prefetched under
+    # them, discarded, and re-synthesized with the updated voice and speed.
+    assert calls[0] == ("en_US-amy-medium", "Sentence one.", 1.0)
+    assert calls[1] == ("en_US-amy-medium", "Sentence two.", 1.0)
+    assert calls[2] == ("de_DE-thorsten-high", "Sentence two.", 1.5)
+    assert len(calls) == 3

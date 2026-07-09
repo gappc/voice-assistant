@@ -5,6 +5,7 @@ text elsewhere and drives this via start()/stop()/toggle().
 """
 
 import os
+import queue
 import re
 import subprocess
 import sys
@@ -15,6 +16,7 @@ from pathlib import Path
 from typing import Iterator, NamedTuple, Protocol
 
 import numpy as np
+import onnxruntime as ort
 import sounddevice as sd
 from piper import PiperVoice, SynthesisConfig
 
@@ -57,10 +59,13 @@ KOKORO_VOICE_SOURCES = {
         "model_file": "kokoro-martin.onnx",
         "voices_file": "voices-martin.npz",
     },
+    # fp16, not int8: the int8 build is dynamically quantized (ConvInteger +
+    # DynamicQuantizeLinear on every conv), which measures 3.7x SLOWER than
+    # fp16 on CPU despite being a third of the size.
     "official": {
-        "url_model": "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/kokoro-v1.0.int8.onnx",
+        "url_model": "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/kokoro-v1.0.fp16.onnx",
         "url_voices": "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/voices-v1.0.bin",
-        "model_file": "kokoro-v1.0.int8.onnx",
+        "model_file": "kokoro-v1.0.fp16.onnx",
         "voices_file": "voices-v1.0.bin",
     },
 }
@@ -85,6 +90,27 @@ def ensure_kokoro_voice_files(model_name, voices_dir):
                 if tmp_path.exists():
                     tmp_path.unlink()
     return model_path, voices_path
+
+
+# ONNX Runtime defaults to one intra-op thread per hardware thread with busy-wait
+# spinning enabled. On this class of machine that costs ~5x the CPU for no
+# wall-clock gain, because Kokoro's graph is deep and sequential rather than wide.
+KOKORO_INTRA_OP_THREADS = int(os.environ.get("VOICE_KOKORO_THREADS", "4"))
+
+
+def build_kokoro(model_path, voices_path):
+    """Construct a Kokoro wrapper over a CPU session with bounded thread usage."""
+    from kokoro_onnx import Kokoro
+
+    opts = ort.SessionOptions()
+    opts.intra_op_num_threads = KOKORO_INTRA_OP_THREADS
+    opts.inter_op_num_threads = 1
+    opts.add_session_config_entry("session.intra_op.allow_spinning", "0")
+    opts.add_session_config_entry("session.inter_op.allow_spinning", "0")
+    session = ort.InferenceSession(
+        str(model_path), sess_options=opts, providers=["CPUExecutionProvider"]
+    )
+    return Kokoro.from_session(session, str(voices_path))
 
 
 # --- Sentence segmentation ---------------------------------------------
@@ -171,10 +197,9 @@ class KokoroEngine:
 
     def load(self) -> None:
         if self._kokoro is None:
-            from kokoro_onnx import Kokoro
             model_path, voices_path = ensure_kokoro_voice_files(self.model_name, self.voices_dir)
             print(f"[read] loading Kokoro voice '{self.model_name}' ...")
-            self._kokoro = Kokoro(str(model_path), str(voices_path))
+            self._kokoro = build_kokoro(model_path, voices_path)
 
     def synthesize(self, text: str, speed: float) -> Iterator[AudioChunk]:
         self.load()
@@ -196,6 +221,7 @@ class SpeechReader:
     """Reads text aloud with Piper or Kokoro, streaming per sentence for prompt stop."""
 
     BLOCK = 2048  # frames per write; bounds stop latency to a fraction of a second
+    PREFETCH = 1  # sentences synthesized ahead of playback
 
     def __init__(
         self,
@@ -215,7 +241,11 @@ class SpeechReader:
         self._worker = None
         self._lock = threading.Lock()
         self._engines = {}
+        self._engines_lock = threading.Lock()
         self._active_engine = None
+        # Bumped on every voice/speed change so prefetched audio synthesized under
+        # superseded settings can be detected and redone before it is played.
+        self._settings_gen = 0
 
     # --- lifecycle -----------------------------------------------------
     def load(self):
@@ -226,16 +256,17 @@ class SpeechReader:
 
     def _get_or_create_engine(self, spec: VoiceSpec) -> TTSEngine:
         engine_key = (spec.engine, spec.model)
-        if engine_key not in self._engines:
-            if spec.engine == "piper":
-                self._engines[engine_key] = PiperEngine(spec.model, self._voices_dir)
-            elif spec.engine == "kokoro":
-                self._engines[engine_key] = KokoroEngine(
-                    spec.model, spec.voice_id, spec.lang, self._voices_dir
-                )
-            else:
-                raise ValueError(f"Unknown engine: {spec.engine}")
-        return self._engines[engine_key]
+        with self._engines_lock:  # the prefetch thread creates engines too
+            if engine_key not in self._engines:
+                if spec.engine == "piper":
+                    self._engines[engine_key] = PiperEngine(spec.model, self._voices_dir)
+                elif spec.engine == "kokoro":
+                    self._engines[engine_key] = KokoroEngine(
+                        spec.model, spec.voice_id, spec.lang, self._voices_dir
+                    )
+                else:
+                    raise ValueError(f"Unknown engine: {spec.engine}")
+            return self._engines[engine_key]
 
     @property
     def is_reading(self):
@@ -279,12 +310,16 @@ class SpeechReader:
             worker.join()
 
     def set_voice(self, name):
-        self._voice_name = name
+        with self._lock:
+            self._voice_name = name
+            self._settings_gen += 1
         if not self._reading:
             self.load()
 
     def set_speed(self, length_scale):
-        self._speed = length_scale
+        with self._lock:
+            self._speed = length_scale
+            self._settings_gen += 1
 
     def set_output_device(self, index):
         self._output_device = index
@@ -294,19 +329,83 @@ class SpeechReader:
         if self._on_state_change:
             self._on_state_change()
 
+    def _settings_snapshot(self):
+        with self._lock:
+            return self._voice_name, self._speed, self._settings_gen
+
+    def _synth_sentence(self, sentence, voice_name, speed):
+        """Synthesize one sentence to a materialized list of (samples, rate)."""
+        spec = VOICE_CATALOG.get(voice_name, VOICE_CATALOG[DEFAULT_VOICE])
+        engine = self._get_or_create_engine(spec)
+        engine.load()
+        self._active_engine = engine
+        return [(c.samples, c.sample_rate) for c in engine.synthesize(sentence, speed)]
+
     def _iter_chunks(self, text):
-        """Yield (int16 samples, sample_rate) per synthesized sentence."""
+        """Yield (int16 samples, sample_rate), synthesizing one sentence ahead.
+
+        Synthesis runs at RTF well under 1.0, but playback of sentence N used to
+        block synthesis of N+1, leaving a ~0.6-0.8s silence at every sentence
+        boundary. A background producer keeps one sentence buffered so playback
+        is continuous.
+        """
         sentences = split_sentences(text)
-        for sentence in sentences:
-            if self._stop.is_set():
-                return
-            spec = VOICE_CATALOG.get(self._voice_name, VOICE_CATALOG[DEFAULT_VOICE])
-            self._active_engine = self._get_or_create_engine(spec)
-            self._active_engine.load()
-            for chunk in self._active_engine.synthesize(sentence, self._speed):
+        if not sentences:
+            return
+
+        q = queue.Queue()
+        done = object()
+        cancel = threading.Event()
+        error = []
+        # Claimed before synthesizing, released once the consumer takes the result,
+        # so at most PREFETCH sentences are ever synthesized speculatively.
+        slots = threading.Semaphore(self.PREFETCH)
+
+        def cancelled():
+            return cancel.is_set() or self._stop.is_set()
+
+        def produce():
+            try:
+                for sentence in sentences:
+                    while not slots.acquire(timeout=0.05):
+                        if cancelled():
+                            return
+                    if cancelled():
+                        return
+                    voice, speed, gen = self._settings_snapshot()
+                    q.put((gen, sentence, self._synth_sentence(sentence, voice, speed)))
+            except BaseException as exc:  # surfaced on the consumer's thread
+                error.append(exc)
+            finally:
+                q.put(done)
+
+        producer = threading.Thread(target=produce, daemon=True)
+        producer.start()
+        try:
+            while True:
                 if self._stop.is_set():
                     return
-                yield chunk.samples, chunk.sample_rate
+                try:
+                    item = q.get(timeout=0.05)
+                except queue.Empty:
+                    continue
+                if item is done:
+                    break
+                slots.release()  # let the producer start on the next sentence now
+                gen, sentence, chunks = item
+                voice, speed, current_gen = self._settings_snapshot()
+                if gen != current_gen:
+                    # Voice or speed changed after this sentence was prefetched.
+                    chunks = self._synth_sentence(sentence, voice, speed)
+                for samples, sample_rate in chunks:
+                    if self._stop.is_set():
+                        return
+                    yield samples, sample_rate
+            if error:
+                raise error[0]
+        finally:
+            cancel.set()
+            producer.join(timeout=5)
 
     def _play_chunks(self, chunks):
         """Write chunks to an output stream, honoring the stop flag between blocks."""
