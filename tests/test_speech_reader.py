@@ -223,7 +223,7 @@ def test_build_kokoro_bounds_threads_and_disables_spinning(monkeypatch):
         assert opts.get_session_config_entry("session.intra_op.allow_spinning") == "0"
 
 
-def test_kokoro_engine_speed_translation(monkeypatch):
+def test_kokoro_engine_speed_is_native_and_clamped(monkeypatch):
     import numpy as np
 
     class FakeKokoro:
@@ -235,32 +235,24 @@ def test_kokoro_engine_speed_translation(monkeypatch):
             return np.zeros(10, dtype=np.float32), 24000
 
     monkeypatch.setattr(speech_reader, "build_kokoro", lambda model, voices: FakeKokoro())
+    monkeypatch.setattr(
+        speech_reader, "ensure_kokoro_voice_files",
+        lambda name, folder: (Path("model"), Path("voices")),
+    )
 
-    # Avoid downloading files
-    monkeypatch.setattr(speech_reader, "ensure_kokoro_voice_files", lambda name, folder: (Path("model"), Path("voices")))
-
-    # Create KokoroEngine
     engine = speech_reader.KokoroEngine(model_name="martin", voices_dir=Path("/dummy"))
     engine.load()
 
-    # Normal speed (reciprocal of 1.0 is 1.0)
-    list(engine.synthesize("test", 1.0, "martin", "de"))
-    assert engine._kokoro.created_calls[-1][2] == 1.0
+    # Higher speed = faster. Passed through untouched inside Kokoro's range.
+    for given, expected in [(1.0, 1.0), (0.8, 0.8), (1.25, 1.25)]:
+        list(engine.synthesize("test", given, "martin", "de"))
+        assert engine._kokoro.created_calls[-1][2] == expected
 
-    # Slow speed (reciprocal of 1.3 is ~0.769)
-    list(engine.synthesize("test", 1.3, "martin", "de"))
-    assert abs(engine._kokoro.created_calls[-1][2] - 1.0 / 1.3) < 1e-5
-
-    # Fast speed (reciprocal of 0.8 is 1.25)
-    list(engine.synthesize("test", 0.8, "martin", "de"))
-    assert engine._kokoro.created_calls[-1][2] == 1.25
-
-    # Extreme slow (Piper length_scale 3.0 -> reciprocal 0.33 -> clamped to 0.5)
-    list(engine.synthesize("test", 3.0, "martin", "de"))
+    # Outside [0.5, 2.0] Kokoro raises, so clamp.
+    list(engine.synthesize("test", 0.2, "martin", "de"))
     assert engine._kokoro.created_calls[-1][2] == 0.5
 
-    # Extreme fast (Piper length_scale 0.2 -> reciprocal 5.0 -> clamped to 2.0)
-    list(engine.synthesize("test", 0.2, "martin", "de"))
+    list(engine.synthesize("test", 5.0, "martin", "de"))
     assert engine._kokoro.created_calls[-1][2] == 2.0
 
 

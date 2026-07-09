@@ -143,13 +143,11 @@ class KokoroEngine:
 
     def synthesize(self, text: str, speed: float, voice_id: str, lang: str) -> Iterator[AudioChunk]:
         self.load()
-        # Convert Piper's length_scale speed to Kokoro speed (reciprocal)
-        kokoro_speed = 1.0 / speed
-        kokoro_speed = max(0.5, min(kokoro_speed, 2.0))
+        speed = max(0.5, min(speed, 2.0))  # Kokoro asserts this range in create()
         float32_samples, sample_rate = self._kokoro.create(
             text,
             voice=voice_id,
-            speed=kokoro_speed,
+            speed=speed,
             lang=lang,
         )
         clamped = np.clip(float32_samples, -1.0, 1.0)

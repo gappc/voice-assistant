@@ -26,8 +26,8 @@ SAMPLERATE = 16000
 TRIGGER_KEY_CODE = ecodes.KEY_RIGHTALT  # Scan code 100
 KEYBOARD_LAYOUT = "de" # Set to "de" for German, "us" for US
 READ_KEY_CODE = ecodes.KEY_F23  # Copilot key emits Meta+Shift+F23; F23 is the tell
-READ_SPEED = 1.0  # Piper length_scale (1.0 = normal; >1 slower, <1 faster)
-SPEED_PRESETS = {"Slow": 1.3, "Normal": 1.0, "Fast": 0.8}
+READ_SPEED = 1.0  # playback speed multiplier (1.0 = normal; >1 faster, <1 slower)
+SPEED_PRESETS = {"Slow": 0.8, "Normal": 1.0, "Fast": 1.25}
 
 # Helper for thread-safe UI updates
 class UIUpdater(QObject):
