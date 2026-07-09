@@ -265,9 +265,25 @@ class VoiceAssistant:
                 print(f"Error starting audio stream on device {self.current_device}: {e}")
                 self.stream = None
 
+    def _save_settings(self):
+        try:
+            tray_settings.save(
+                tray_settings.TraySettings(
+                    input_device=_device_name(self.current_device, self.get_input_devices()),
+                    output_device=_device_name(self.output_device, self.get_output_devices()),
+                    voice=self.reader._voice_name,
+                    speed=self.reader._speed,
+                    paste_with_shift=self.paste_with_shift,
+                ),
+                self._settings_path,
+            )
+        except Exception as exc:
+            print(f"[settings] failed to save: {exc}", file=sys.stderr)
+
     def set_input_device(self, device_id_or_name):
-        """Tray-triggered input device change: apply it (persistence added in Task 4)."""
+        """Tray-triggered input device change: apply it and persist the choice."""
         self._apply_input_device(device_id_or_name)
+        self._save_settings()
 
     def find_keyboards(self):
         keyboards = []
@@ -330,9 +346,15 @@ class VoiceAssistant:
         self.reader.set_output_device(target_index)
         print(f"Output device set to index {target_index}")
 
+    def set_speed(self, scale):
+        """Tray-triggered speed change: apply it and persist the choice."""
+        self.reader.set_speed(scale)
+        self._save_settings()
+
     def set_output_device(self, device_id_or_name):
-        """Tray-triggered output device change: apply it (persistence added in Task 4)."""
+        """Tray-triggered output device change: apply it and persist the choice."""
         self._apply_output_device(device_id_or_name)
+        self._save_settings()
 
     def ensure_ydotoold(self):
         """Ensures ydotoold is running and sets the socket environment variable."""
@@ -461,6 +483,7 @@ class VoiceAssistant:
     def set_paste_with_shift(self, enabled):
         self.paste_with_shift = enabled
         print(f"Paste mode: {'Ctrl+Shift+V' if enabled else 'Ctrl+V'}")
+        self._save_settings()
 
     def refresh_mic_menu(self):
         """Populates the microphone selection submenu."""
@@ -513,7 +536,7 @@ class VoiceAssistant:
             action = QAction(label, self.speed_menu, checkable=True)
             if abs(scale - self.reader._speed) < 1e-9:
                 action.setChecked(True)
-            action.triggered.connect(lambda checked, s=scale: self.reader.set_speed(s))
+            action.triggered.connect(lambda checked, s=scale: self.set_speed(s))
             self.speed_menu.addAction(action)
             group.addAction(action)
 
@@ -522,6 +545,7 @@ class VoiceAssistant:
         try:
             print(f"Switching voice to {name} ...")
             self.reader.set_voice(name)
+            self._save_settings()
         except Exception as exc:
             print(f"[read] failed to switch voice to {name}: {exc}", file=sys.stderr)
             self.tray.showMessage(

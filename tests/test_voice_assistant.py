@@ -120,3 +120,105 @@ def test_resolve_startup_settings_defaults_when_nothing_saved(tmp_path):
     assert result.voice == voice_assistant.DEFAULT_VOICE
     assert result.speed == voice_assistant.READ_SPEED
     assert result.paste_with_shift is True
+
+
+class _FakeReader:
+    """Minimal stand-in for SpeechReader: mutates _voice_name/_speed like the
+    real thing so _save_settings sees the post-change state."""
+
+    def __init__(self, voice_name, speed):
+        self._voice_name = voice_name
+        self._speed = speed
+
+    def set_speed(self, scale):
+        self._speed = scale
+
+    def set_voice(self, name):
+        self._voice_name = name
+
+
+def test_save_settings_snapshots_current_state(monkeypatch, tmp_path):
+    va = voice_assistant.VoiceAssistant.__new__(voice_assistant.VoiceAssistant)
+    va._settings_path = tmp_path / "settings.json"
+    va.current_device = 3
+    va.output_device = 1
+    va.paste_with_shift = False
+    va.reader = _FakeReader("en_US-sarah", 1.25)
+    monkeypatch.setattr(va, "get_input_devices", lambda: [{"index": 3, "name": "USB Microphone"}])
+    monkeypatch.setattr(va, "get_output_devices", lambda: [{"index": 1, "name": "Speakers"}])
+
+    va._save_settings()
+
+    saved = voice_assistant.tray_settings.load(va._settings_path)
+    assert saved == voice_assistant.tray_settings.TraySettings(
+        input_device="USB Microphone",
+        output_device="Speakers",
+        voice="en_US-sarah",
+        speed=1.25,
+        paste_with_shift=False,
+    )
+
+
+def test_set_paste_with_shift_persists(monkeypatch, tmp_path):
+    va = voice_assistant.VoiceAssistant.__new__(voice_assistant.VoiceAssistant)
+    va._settings_path = tmp_path / "settings.json"
+    va.current_device = None
+    va.output_device = None
+    va.reader = _FakeReader(voice_assistant.DEFAULT_VOICE, voice_assistant.READ_SPEED)
+    monkeypatch.setattr(va, "get_input_devices", lambda: [])
+    monkeypatch.setattr(va, "get_output_devices", lambda: [])
+
+    va.set_paste_with_shift(False)
+
+    assert va.paste_with_shift is False
+    saved = voice_assistant.tray_settings.load(va._settings_path)
+    assert saved.paste_with_shift is False
+
+
+def test_set_speed_persists(monkeypatch, tmp_path):
+    va = voice_assistant.VoiceAssistant.__new__(voice_assistant.VoiceAssistant)
+    va._settings_path = tmp_path / "settings.json"
+    va.current_device = None
+    va.output_device = None
+    va.paste_with_shift = True
+    va.reader = _FakeReader(voice_assistant.DEFAULT_VOICE, voice_assistant.READ_SPEED)
+    monkeypatch.setattr(va, "get_input_devices", lambda: [])
+    monkeypatch.setattr(va, "get_output_devices", lambda: [])
+
+    va.set_speed(1.25)
+
+    assert va.reader._speed == 1.25
+    saved = voice_assistant.tray_settings.load(va._settings_path)
+    assert saved.speed == 1.25
+
+
+def test_on_select_voice_persists_on_success(monkeypatch, tmp_path):
+    va = voice_assistant.VoiceAssistant.__new__(voice_assistant.VoiceAssistant)
+    va._settings_path = tmp_path / "settings.json"
+    va.current_device = None
+    va.output_device = None
+    va.paste_with_shift = True
+    va.reader = _FakeReader(voice_assistant.DEFAULT_VOICE, voice_assistant.READ_SPEED)
+    monkeypatch.setattr(va, "get_input_devices", lambda: [])
+    monkeypatch.setattr(va, "get_output_devices", lambda: [])
+
+    va.on_select_voice("en_US-sarah")
+
+    saved = voice_assistant.tray_settings.load(va._settings_path)
+    assert saved.voice == "en_US-sarah"
+
+
+def test_on_select_voice_does_not_persist_on_failure(tmp_path):
+    va = voice_assistant.VoiceAssistant.__new__(voice_assistant.VoiceAssistant)
+    va._settings_path = tmp_path / "settings.json"
+    va.tray = types.SimpleNamespace(showMessage=lambda *a, **k: None)
+
+    class _FailingReader:
+        def set_voice(self, name):
+            raise RuntimeError("boom")
+
+    va.reader = _FailingReader()
+
+    va.on_select_voice("bad-voice")
+
+    assert not va._settings_path.exists()
