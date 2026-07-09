@@ -29,6 +29,35 @@ READ_KEY_CODE = ecodes.KEY_F23  # Copilot key emits Meta+Shift+F23; F23 is the t
 READ_SPEED = 1.0  # playback speed multiplier (1.0 = normal; >1 faster, <1 slower)
 SPEED_PRESETS = {"Slow": 0.8, "Normal": 1.0, "Fast": 1.25}
 
+
+def _resolve_device(id_or_name, devices):
+    """Match `id_or_name` against `devices` ([{"index", "name"}, ...]).
+    Tries an index match first, then a case-insensitive name substring match.
+    Returns the matched index, or None."""
+    if id_or_name is None:
+        return None
+    try:
+        idx = int(id_or_name)
+        if any(d["index"] == idx for d in devices):
+            return idx
+    except (ValueError, TypeError):
+        pass
+    for d in devices:
+        if str(id_or_name).lower() in d["name"].lower():
+            return d["index"]
+    return None
+
+
+def _device_name(index, devices):
+    """Look up the name for `index` in an enumerated device list, or None."""
+    if index is None:
+        return None
+    for d in devices:
+        if d["index"] == index:
+            return d["name"]
+    return None
+
+
 # Helper for thread-safe UI updates
 class UIUpdater(QObject):
     update_signal = Signal()
@@ -172,26 +201,11 @@ class VoiceAssistant:
                 input_devices.append({'index': i, 'name': d['name']})
         return input_devices
 
-    def set_input_device(self, device_id_or_name):
+    def _apply_input_device(self, device_id_or_name):
         """Sets the input device and restarts the stream if necessary."""
         devices = self.get_input_devices()
-        target_index = None
+        target_index = _resolve_device(device_id_or_name, devices)
 
-        # Try to find by index first if it's an int or string digit
-        try:
-            idx = int(device_id_or_name)
-            if any(d['index'] == idx for d in devices):
-                target_index = idx
-        except (ValueError, TypeError):
-            pass
-
-        # Try to find by name if not found by index
-        if target_index is None:
-            for d in devices:
-                if device_id_or_name and device_id_or_name.lower() in d['name'].lower():
-                    target_index = d['index']
-                    break
-        
         # Default to system default if still not found
         if target_index is None:
             if device_id_or_name:
@@ -203,7 +217,7 @@ class VoiceAssistant:
             if self.stream is not None:
                 self.stream.stop()
                 self.stream.close()
-            
+
             try:
                 self.stream = sd.InputStream(
                     device=self.current_device,
@@ -216,6 +230,10 @@ class VoiceAssistant:
             except Exception as e:
                 print(f"Error starting audio stream on device {self.current_device}: {e}")
                 self.stream = None
+
+    def set_input_device(self, device_id_or_name):
+        """Tray-triggered input device change: apply it (persistence added in Task 4)."""
+        self._apply_input_device(device_id_or_name)
 
     def find_keyboards(self):
         keyboards = []
@@ -269,11 +287,18 @@ class VoiceAssistant:
             if d["max_output_channels"] > 0
         ]
 
-    def set_output_device(self, index):
+    def _apply_output_device(self, device_id_or_name):
         """Sets the output device for read-aloud playback and beeps."""
-        self.output_device = index
-        self.reader.set_output_device(index)
-        print(f"Output device set to index {index}")
+        target_index = _resolve_device(device_id_or_name, self.get_output_devices())
+        if target_index is None and device_id_or_name is not None:
+            print(f"Warning: Output device '{device_id_or_name}' not found. Using default.")
+        self.output_device = target_index
+        self.reader.set_output_device(target_index)
+        print(f"Output device set to index {target_index}")
+
+    def set_output_device(self, device_id_or_name):
+        """Tray-triggered output device change: apply it (persistence added in Task 4)."""
+        self._apply_output_device(device_id_or_name)
 
     def ensure_ydotoold(self):
         """Ensures ydotoold is running and sets the socket environment variable."""
@@ -479,7 +504,7 @@ class VoiceAssistant:
             return
 
         # Initialize the audio stream
-        self.set_input_device(self.current_device)
+        self._apply_input_device(self.current_device)
 
         # Load the TTS voice (downloads on first run)
         self.reader.load()

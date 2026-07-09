@@ -34,6 +34,48 @@ def test_get_output_devices_filters_by_output_channels(monkeypatch):
     ]
 
 
+def test_resolve_device_matches_by_index():
+    devices = [{"index": 0, "name": "Mic"}, {"index": 2, "name": "USB Mic"}]
+    assert voice_assistant._resolve_device(2, devices) == 2
+    assert voice_assistant._resolve_device("2", devices) == 2
+
+
+def test_resolve_device_matches_by_name_substring():
+    devices = [{"index": 0, "name": "Mic"}, {"index": 2, "name": "USB Microphone"}]
+    assert voice_assistant._resolve_device("usb", devices) == 2
+
+
+def test_resolve_device_returns_none_for_no_match_or_none():
+    devices = [{"index": 0, "name": "Mic"}]
+    assert voice_assistant._resolve_device("nonexistent", devices) is None
+    assert voice_assistant._resolve_device(None, devices) is None
+
+
+def test_device_name_looks_up_name_by_index():
+    devices = [{"index": 0, "name": "Mic"}, {"index": 2, "name": "USB Microphone"}]
+    assert voice_assistant._device_name(2, devices) == "USB Microphone"
+
+
+def test_device_name_returns_none_for_none_index():
+    devices = [{"index": 0, "name": "Mic"}]
+    assert voice_assistant._device_name(None, devices) is None
+    assert voice_assistant._device_name(99, devices) is None
+
+
+def test_set_output_device_resolves_by_name(monkeypatch):
+    fake_devices = [
+        {"name": "Mic Only", "max_input_channels": 2, "max_output_channels": 0},
+        {"name": "Speakers", "max_input_channels": 0, "max_output_channels": 2},
+    ]
+    monkeypatch.setattr(voice_assistant.sd, "query_devices", lambda: fake_devices)
+
+    va = voice_assistant.VoiceAssistant.__new__(voice_assistant.VoiceAssistant)
+    va.reader = types.SimpleNamespace(set_output_device=lambda idx: None)
+    va.set_output_device("speakers")
+
+    assert va.output_device == 1
+
+
 def test_piper_is_not_a_dependency():
     """piper-tts must be absent from the environment, not merely unimported."""
     import importlib.metadata as md
