@@ -459,7 +459,7 @@ class VoiceAssistant:
             group.addAction(action)
 
     def on_select_voice(self, name):
-        """Switch the Piper voice (downloads on demand)."""
+        """Switch the voice (downloads the model on demand)."""
         try:
             print(f"Switching voice to {name} ...")
             self.reader.set_voice(name)

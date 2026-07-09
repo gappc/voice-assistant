@@ -46,7 +46,7 @@ class _FakeStream:
 
 
 def _make_reader():
-    return speech_reader.SpeechReader("en_US-amy-medium", speed=1.0)
+    return speech_reader.SpeechReader("en_US-bella", speed=1.0)
 
 
 def test_toggle_when_idle_calls_start(monkeypatch):

@@ -5,7 +5,7 @@ A fast, privacy-respecting, and reliable local voice-to-text assistant designed 
 ## Features
 
 - **Push-to-Talk**: Hold **Right Alt** anywhere in the OS to record, release to transcribe and type. 
-- **Read Aloud (Text-to-Speech)**: Tap the **Copilot key** (right of AltGr) to have your highlighted selection (or clipboard) read aloud with a natural local voice via [Piper](https://github.com/OHF-Voice/piper1-gpl). Tap again to stop. Fully offline after a one-time voice download.
+- **Read Aloud (Text-to-Speech)**: Tap the **Copilot key** (right of AltGr) to have your highlighted selection (or clipboard) read aloud with a natural local voice via [Kokoro-82M](https://huggingface.co/hexgrad/Kokoro-82M). Tap again to stop. Fully offline after a one-time model download.
 - **Wayland-Native Global Hotkeys**: Uses `evdev` to capture key events directly from the hardware, bypassing Wayland security limitations that block traditional listeners like `pynput`.
 - **Layout-Independent Text Injection**: Uses `wl-copy` and `ydotool` (Ctrl+Shift+V simulation by default) to paste the transcribed text. This ensures 100% accuracy for special characters and prevents mixed-up letters on non-US layouts (like Z/Y on German QWERTZ). The default Ctrl+Shift+V works in terminals as well as editors and IDEs; a tray menu toggle is provided to switch to plain Ctrl+V for apps that reserve Ctrl+Shift+V (e.g. LibreOffice "Paste Special").
 - **Audio Feedback**: Plays subtle beeps indicating when recording starts and stops—no need to look at a terminal or status bar.
@@ -51,10 +51,11 @@ This project uses `uv` for seamless, lightning-fast Python dependency management
 2. Tap the **Copilot key** (located to the right of AltGr).
 3. The text is read aloud in the selected voice. Tap the key again to stop.
 
-The default voice is `en_US-amy-medium`, downloaded automatically on first use and
-cached under `~/.local/share/voice-assistant/voices/`. Use the tray menu to switch
-the **Output** device, **Voice** (Amy / Ryan / Alan / Alba / Thorsten / MLS German), and **Reading Speed**
-(Slow / Normal / Fast). Starting dictation (Right Alt) stops any in-progress reading.
+The default voice is `en_US-bella`, downloaded automatically on first use and
+cached under `~/.local/share/voice-assistant/voices/kokoro/`. Use the tray menu to
+switch the **Output** device, **Voice** (Bella / Sarah / Michael / George / Emma /
+Martin German), and **Reading Speed** (Slow / Normal / Fast). Starting dictation
+(Right Alt) stops any in-progress reading.
 
 Test speech without the hotkey:
 ```bash
