@@ -6,6 +6,7 @@ import threading
 import queue
 import signal
 import argparse
+import re
 from pathlib import Path
 from typing import NamedTuple
 
@@ -32,6 +33,9 @@ KEYBOARD_LAYOUT = "de" # Set to "de" for German, "us" for US
 READ_KEY_CODE = ecodes.KEY_F23  # Copilot key emits Meta+Shift+F23; F23 is the tell
 READ_SPEED = 1.0  # playback speed multiplier (1.0 = normal; >1 faster, <1 slower)
 SPEED_PRESETS = {"Slow": 0.8, "Normal": 1.0, "Fast": 1.25}
+# A device can open successfully and still never deliver audio (e.g. a PipeWire
+# node whose card another process holds). Warn if nothing arrives by then.
+FIRST_FRAME_TIMEOUT = 1.5
 
 
 def _resolve_device(id_or_name, devices):
@@ -62,6 +66,43 @@ def _device_name(index, devices):
     return None
 
 
+_RAW_ALSA_RE = re.compile(r"\(hw:\d+,\d+\)")
+
+
+def _is_raw_alsa_device(name):
+    """True for PortAudio names like ``Logitech BRIO: USB Audio (hw:3,0)``.
+
+    Opening one of these claims the ALSA card *exclusively*, so PipeWire (and
+    therefore every other application) can no longer use the microphone."""
+    return bool(name) and bool(_RAW_ALSA_RE.search(str(name)))
+
+
+def _normalize_device_token(text):
+    """Lowercase and collapse punctuation to ``_`` so ``Logitech BRIO`` matches
+    ``alsa_input.usb-046d_Logitech_BRIO_....analog-stereo``."""
+    return re.sub(r"[^a-z0-9]+", "_", str(text).lower()).strip("_")
+
+
+def _migrate_raw_alsa_name(saved_name, devices):
+    """Map a persisted raw ``hw:N,M`` device name onto the equivalent shared
+    device, so old settings files stop locking the card. Returns `saved_name`
+    unchanged when it is not raw, or when no shared equivalent is present."""
+    if not isinstance(saved_name, str) or not _is_raw_alsa_device(saved_name):
+        return saved_name
+    # "Logitech BRIO: USB Audio (hw:3,0)" -> "logitech_brio"
+    label = _normalize_device_token(saved_name.split(":")[0])
+    if not label:
+        return saved_name
+    for d in devices:
+        if _is_raw_alsa_device(d["name"]):
+            continue
+        if label in _normalize_device_token(d["name"]):
+            print(f"[settings] migrating input device '{saved_name}' -> '{d['name']}'")
+            return d["name"]
+    return saved_name
+
+
+
 class _StartupSettings(NamedTuple):
     input_device: str | None
     output_device: str | None  # unresolved name; resolved via _resolve_device + get_output_devices()
@@ -90,6 +131,7 @@ def _resolve_startup_settings(initial_device, settings_path):
 # Helper for thread-safe UI updates
 class UIUpdater(QObject):
     update_signal = Signal()
+    notify_signal = Signal(str, str)
 
 class VoiceAssistant:
     def __init__(self, initial_device=None, settings_path=None):
@@ -107,12 +149,23 @@ class VoiceAssistant:
         self.running = True
         self.window = None
         self.stream = None
+        self._first_frame = threading.Event()
+        self._watchdog = None
 
         self._settings_path = (
             Path(settings_path) if settings_path else tray_settings.default_config_dir() / "settings.json"
         )
         startup = _resolve_startup_settings(initial_device, self._settings_path)
-        self.current_device = startup.input_device
+        # A saved raw hw: name would re-lock the card; map it to the shared node.
+        self.current_device = _migrate_raw_alsa_name(
+            startup.input_device, self.get_input_devices()
+        )
+        # Names to persist. Kept apart from current_device/output_device, which
+        # hold whatever actually resolved — possibly a fallback.
+        self.preferred_input_name = (
+            self.current_device if isinstance(self.current_device, str) else None
+        )
+        self.preferred_output_name = startup.output_device
         # Ctrl+Shift+V works in terminals and most editors; flip off for apps
         # that reserve it (e.g. LibreOffice "Paste Special").
         self.paste_with_shift = startup.paste_with_shift
@@ -123,6 +176,7 @@ class VoiceAssistant:
 
         self.ui_updater = UIUpdater()
         self.ui_updater.update_signal.connect(self._do_update_ui)
+        self.ui_updater.notify_signal.connect(self._do_notify)
 
         # Read-aloud (TTS)
         self.output_device = _resolve_device(startup.output_device, self.get_output_devices())
@@ -136,6 +190,7 @@ class VoiceAssistant:
     def record_callback(self, indata, frames, time, status):
         if status:
             print(status, file=sys.stderr)
+        self._first_frame.set()
         if self.is_recording:
             self.audio_data.append(indata.copy())
 
@@ -155,16 +210,29 @@ class VoiceAssistant:
             if not self.is_recording:
                 self.active_recording_device = device_path
                 self.audio_data = []
+                # Open the card only now, and only for as long as we record.
+                if not self._open_input_stream():
+                    self.active_recording_device = None
+                    return
                 self.is_recording = True
                 self.update_ui()
                 print(f"\nRecording started (Device: {device_path})...")
                 self.play_beep(frequency=600) # High beep for start
+                self._watchdog = threading.Timer(
+                    FIRST_FRAME_TIMEOUT, self._on_first_frame_timeout
+                )
+                self._watchdog.daemon = True
+                self._watchdog.start()
 
     def stop_recording(self, device_path):
         with self.lock:
             if self.is_recording and self.active_recording_device == device_path:
                 self.is_recording = False
                 self.active_recording_device = None
+                if self._watchdog is not None:
+                    self._watchdog.cancel()
+                    self._watchdog = None
+                self._close_input_stream()
                 self.update_ui()
                 print("Recording stopped. Processing...")
                 self.play_beep(frequency=400) # Lower beep for stop
@@ -236,7 +304,8 @@ class VoiceAssistant:
         return input_devices
 
     def _apply_input_device(self, device_id_or_name):
-        """Sets the input device and restarts the stream if necessary."""
+        """Selects the input device. Does **not** open it: the stream is opened
+        only while recording, so an idle assistant never holds the card."""
         devices = self.get_input_devices()
         target_index = _resolve_device(device_id_or_name, devices)
 
@@ -244,33 +313,89 @@ class VoiceAssistant:
         if target_index is None:
             if device_id_or_name:
                 print(f"Warning: Device '{device_id_or_name}' not found. Using default.")
+                self._notify(
+                    "Microphone not found",
+                    f"'{device_id_or_name}' is unavailable. Falling back to the "
+                    "system default microphone.",
+                )
+                # Keep the request as the stored preference: the device may be
+                # merely unplugged, and persisting the fallback would silently
+                # discard the user's real choice.
+                if isinstance(device_id_or_name, str):
+                    self.preferred_input_name = device_id_or_name
             target_index = sd.default.device[0]
+        else:
+            self.preferred_input_name = _device_name(target_index, devices)
 
         with self.lock:
+            was_open = self.stream is not None
+            if was_open:
+                self._close_input_stream()
             self.current_device = target_index
-            if self.stream is not None:
-                self.stream.stop()
-                self.stream.close()
+            name = _device_name(target_index, devices) or target_index
+            print(f"Input device set to: {name} (Index: {target_index})")
+            # Only reopen mid-recording; otherwise stay closed until needed.
+            if was_open:
+                self._open_input_stream()
 
-            try:
-                self.stream = sd.InputStream(
-                    device=self.current_device,
-                    samplerate=SAMPLERATE,
-                    channels=CHANNELS,
-                    callback=self.record_callback
-                )
-                self.stream.start()
-                print(f"Input device set to: {sd.query_devices(self.current_device)['name']} (Index: {self.current_device})")
-            except Exception as e:
-                print(f"Error starting audio stream on device {self.current_device}: {e}")
-                self.stream = None
+    def _open_input_stream(self):
+        """Opens and starts the capture stream on the current device.
+
+        Caller must hold ``self.lock``. Returns True on success."""
+        self._first_frame.clear()
+        try:
+            self.stream = sd.InputStream(
+                device=self.current_device,
+                samplerate=SAMPLERATE,
+                channels=CHANNELS,
+                callback=self.record_callback,
+            )
+            self.stream.start()
+            return True
+        except Exception as e:
+            print(f"Error starting audio stream on device {self.current_device}: {e}")
+            self.stream = None
+            self._notify("Microphone unavailable", f"Could not open the microphone: {e}")
+            return False
+
+    def _close_input_stream(self):
+        """Closes the capture stream, releasing the card back to the system."""
+        stream, self.stream = self.stream, None
+        if stream is None:
+            return
+        try:
+            stream.stop()
+            stream.close()
+        except Exception as e:
+            print(f"Warning: error closing audio stream: {e}", file=sys.stderr)
+
+    def _on_first_frame_timeout(self):
+        """Opening a device can succeed and still deliver nothing — a PipeWire
+        node whose card is locked by another process accepts the stream, then
+        blocks forever. Warn instead of recording silence."""
+        if self.is_recording and not self._first_frame.is_set():
+            print("Warning: no audio frames arrived; the device may be in use.",
+                  file=sys.stderr)
+            self._notify(
+                "Microphone delivered no audio",
+                "The selected microphone opened but sent no audio. Another "
+                "application may be holding it.",
+            )
+
+    def _notify(self, title, message):
+        """Shows a tray notification from any thread."""
+        self.ui_updater.notify_signal.emit(title, message)
+
+    def _do_notify(self, title, message):
+        if hasattr(self, "tray"):
+            self.tray.showMessage(title, message, QSystemTrayIcon.Warning)
 
     def _save_settings(self):
         try:
             tray_settings.save(
                 tray_settings.TraySettings(
-                    input_device=_device_name(self.current_device, self.get_input_devices()),
-                    output_device=_device_name(self.output_device, self.get_output_devices()),
+                    input_device=self.preferred_input_name,
+                    output_device=self.preferred_output_name,
                     voice=self.reader._voice_name,
                     speed=self.reader._speed,
                     paste_with_shift=self.paste_with_shift,
@@ -339,9 +464,21 @@ class VoiceAssistant:
 
     def _apply_output_device(self, device_id_or_name):
         """Sets the output device for read-aloud playback and beeps."""
-        target_index = _resolve_device(device_id_or_name, self.get_output_devices())
-        if target_index is None and device_id_or_name is not None:
-            print(f"Warning: Output device '{device_id_or_name}' not found. Using default.")
+        devices = self.get_output_devices()
+        target_index = _resolve_device(device_id_or_name, devices)
+        if target_index is None:
+            if device_id_or_name is not None:
+                print(f"Warning: Output device '{device_id_or_name}' not found. Using default.")
+                self._notify(
+                    "Speaker not found",
+                    f"'{device_id_or_name}' is unavailable. Falling back to the "
+                    "system default output.",
+                )
+                # As above: an absent speaker must not erase the preference.
+                if isinstance(device_id_or_name, str):
+                    self.preferred_output_name = device_id_or_name
+        else:
+            self.preferred_output_name = _device_name(target_index, devices)
         self.output_device = target_index
         self.reader.set_output_device(target_index)
         print(f"Output device set to index {target_index}")
@@ -486,20 +623,36 @@ class VoiceAssistant:
         self._save_settings()
 
     def refresh_mic_menu(self):
-        """Populates the microphone selection submenu."""
+        """Populates the microphone selection submenu.
+
+        Raw ALSA devices (``hw:N,M``) are pushed into a clearly-labelled
+        submenu: opening one claims the sound card exclusively, which hides the
+        microphone from every other application on the system."""
         self.mic_menu.clear()
         devices = self.get_input_devices()
         group = QActionGroup(self.mic_menu)
-        
-        for d in devices:
-            action = QAction(d['name'], self.mic_menu, checkable=True)
-            if d['index'] == self.current_device:
-                action.setChecked(True)
-            
-            # Use a lambda with default argument to capture the current device index
-            action.triggered.connect(lambda checked, idx=d['index']: self.set_input_device(idx))
-            self.mic_menu.addAction(action)
-            group.addAction(action)
+
+        shared = [d for d in devices if not _is_raw_alsa_device(d["name"])]
+        raw = [d for d in devices if _is_raw_alsa_device(d["name"])]
+
+        def add_to(menu, entries):
+            for d in entries:
+                action = QAction(d["name"], menu, checkable=True)
+                if d["index"] == self.current_device:
+                    action.setChecked(True)
+                # Default argument captures the index for this iteration.
+                action.triggered.connect(
+                    lambda checked, idx=d["index"]: self.set_input_device(idx)
+                )
+                menu.addAction(action)
+                group.addAction(action)
+
+        add_to(self.mic_menu, shared)
+        if raw:
+            self.mic_menu.addSeparator()
+            # Kept as an attribute so Qt does not garbage-collect the submenu.
+            self._raw_mic_menu = self.mic_menu.addMenu("Raw ALSA (locks the card)")
+            add_to(self._raw_mic_menu, raw)
 
     def refresh_output_menu(self):
         """Populates the output-device selection submenu."""
@@ -561,7 +714,7 @@ class VoiceAssistant:
             print("No keyboard devices found! Check permissions or /dev/input permissions.")
             return
 
-        # Initialize the audio stream
+        # Resolve the input device (does not open it: see _open_input_stream)
         self._apply_input_device(self.current_device)
 
         # Load the TTS voice (downloads on first run)
@@ -576,9 +729,7 @@ class VoiceAssistant:
         exit_code = self.run_tray()
         
         # Cleanup
-        if self.stream:
-            self.stream.stop()
-            self.stream.close()
+        self._close_input_stream()
         sys.exit(exit_code)
 
     def test_read(self, text, voice=None):
