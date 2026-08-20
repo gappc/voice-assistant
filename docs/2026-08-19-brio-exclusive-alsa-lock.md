@@ -176,11 +176,28 @@ Verified against the real settings file: `Logitech BRIO: USB Audio (hw:3,0)` →
 microphone made absent, an unrelated tray change left that value intact while
 dictation still fell back to a working device.
 
-### Still open
+### Follow-ups, also fixed (2026-08-20)
 
-- **The device list is frozen at startup** (see corrections above), so the tray
-  picker cannot see hotplugged microphones until the assistant restarts.
-- **SIGTERM does not stop the app** while the Qt event loop runs: `handle_signal`
-  is a Python-level handler, and no Python bytecode executes during
-  `app.exec()`. `timeout`/`systemctl stop` need `SIGKILL`. Noticed while
-  testing; unrelated to the audio lock.
+**Hotplug.** `_reload_devices()` tears PortAudio down and back up
+(`sd._terminate()` / `sd._initialize()`) — the only way to refresh a list that
+is otherwise built once, inside `Pa_Initialize`. It runs from
+`_on_menu_about_to_show()`, wired to the tray menu's `aboutToShow`, so the
+picker rescans every time it opens. Because `Pa_Terminate` invalidates open
+streams, the rescan is a no-op while one is open.
+
+Indices are only meaningful within a single enumeration, so the rescan
+re-resolves through `preferred_input_name` / `preferred_output_name` rather
+than trusting the old integers. Measured: a rescan costs ~22 ms, and adding a
+null sink shifted the BRIO from index 18 to 19 while it still resolved
+correctly by name.
+
+**SIGTERM.** Python runs signal handlers only between bytecodes, and no
+bytecode executes while Qt owns the loop — so `handle_signal` never fired and
+the process could only be `SIGKILL`ed. A `QTimer` firing every 200 ms into an
+empty slot gives the interpreter the chance to run them. `stop()` no longer
+calls `sys.exit()` either: it ends `app.exec()` via `app.quit()` and lets
+`run()` do the cleanup and own process exit. (`sys.exit()` is still used when
+the signal arrives before the tray exists — nothing else would exit for us.)
+
+Verified: `kill -TERM` on the running assistant now exits in under a second,
+printing `Received signal 15, shutting down...`.

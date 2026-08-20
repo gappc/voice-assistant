@@ -302,7 +302,8 @@ def _bare_assistant(monkeypatch, devices):
     monkeypatch.setattr(va, "_notify", lambda title, msg: va.notifications.append((title, msg)))
     monkeypatch.setattr(va, "update_ui", lambda: None)
     monkeypatch.setattr(va, "play_beep", lambda **kw: None)
-    va.reader = types.SimpleNamespace(stop=lambda: None, is_reading=False)
+    va.reader = types.SimpleNamespace(stop=lambda: None, is_reading=False,
+                                     set_output_device=lambda idx: None)
     _FakeStream.instances = []
     monkeypatch.setattr(voice_assistant.sd, "InputStream", _FakeStream)
     return va
@@ -506,3 +507,108 @@ def test_set_output_device_resolves_by_name(monkeypatch, tmp_path):
 
     assert va.output_device == 1
     assert voice_assistant.tray_settings.load(va._settings_path).output_device == "Speakers"
+
+
+# --- Hotplug: PortAudio's device list is built once at Pa_Initialize ---
+
+
+def test_reload_devices_reinitializes_portaudio_when_idle(monkeypatch):
+    """Without a re-init, a microphone plugged in after startup stays
+    invisible to the tray picker for the life of the process."""
+    calls = []
+    monkeypatch.setattr(voice_assistant.sd, "_terminate", lambda: calls.append("terminate"))
+    monkeypatch.setattr(voice_assistant.sd, "_initialize", lambda: calls.append("initialize"))
+    va = _bare_assistant(monkeypatch, [{"index": 0, "name": "Mic"}])
+    va.preferred_input_name = None
+    va.preferred_output_name = None
+    monkeypatch.setattr(va, "get_output_devices", lambda: [])
+    monkeypatch.setattr(voice_assistant.sd, "default", types.SimpleNamespace(device=[0, 0]))
+
+    va._reload_devices()
+
+    assert calls == ["terminate", "initialize"]
+
+
+def test_reload_devices_skipped_while_stream_is_open(monkeypatch):
+    """Pa_Terminate invalidates open streams — never re-init mid-recording."""
+    calls = []
+    monkeypatch.setattr(voice_assistant.sd, "_terminate", lambda: calls.append("terminate"))
+    monkeypatch.setattr(voice_assistant.sd, "_initialize", lambda: calls.append("initialize"))
+    va = _bare_assistant(monkeypatch, [])
+    va.preferred_input_name = None
+    va.preferred_output_name = None
+    va.stream = _FakeStream()
+
+    va._reload_devices()
+
+    assert calls == []
+
+
+def test_reload_devices_reresolves_indices_from_preferred_names(monkeypatch):
+    """Indices shift when devices come and go; the saved name is the stable
+    handle, so a re-enumeration must re-resolve through it."""
+    monkeypatch.setattr(voice_assistant.sd, "_terminate", lambda: None)
+    monkeypatch.setattr(voice_assistant.sd, "_initialize", lambda: None)
+    va = _bare_assistant(monkeypatch, [
+        {"index": 0, "name": "Newly Plugged Webcam"},
+        {"index": 4, "name": "alsa_input.usb-046d_Logitech_BRIO.analog-stereo"},
+    ])
+    va.current_device = 1  # stale index from the previous enumeration
+    va.output_device = 9   # stale
+    va.preferred_input_name = "alsa_input.usb-046d_Logitech_BRIO.analog-stereo"
+    va.preferred_output_name = "Speakers"
+    monkeypatch.setattr(va, "get_output_devices", lambda: [{"index": 2, "name": "Speakers"}])
+    va.reader = types.SimpleNamespace(set_output_device=lambda i: None, stop=lambda: None)
+
+    va._reload_devices()
+
+    assert va.current_device == 4
+    assert va.output_device == 2
+
+
+def test_reload_devices_falls_back_when_preferred_device_vanished(monkeypatch):
+    monkeypatch.setattr(voice_assistant.sd, "_terminate", lambda: None)
+    monkeypatch.setattr(voice_assistant.sd, "_initialize", lambda: None)
+    monkeypatch.setattr(voice_assistant.sd, "default", types.SimpleNamespace(device=[3, 3]))
+    va = _bare_assistant(monkeypatch, [{"index": 3, "name": "Built-in Mic"}])
+    va.current_device = 7
+    va.preferred_input_name = "Unplugged USB Mic"
+    va.preferred_output_name = None
+    monkeypatch.setattr(va, "get_output_devices", lambda: [])
+    va.reader = types.SimpleNamespace(set_output_device=lambda i: None, stop=lambda: None)
+
+    va._reload_devices()
+
+    assert va.current_device == 3
+    assert va.preferred_input_name == "Unplugged USB Mic", "preference must survive"
+
+
+def test_menu_about_to_show_rescans_and_rebuilds(monkeypatch):
+    va = voice_assistant.VoiceAssistant.__new__(voice_assistant.VoiceAssistant)
+    seen = []
+    monkeypatch.setattr(va, "_reload_devices", lambda: seen.append("reload"))
+    monkeypatch.setattr(va, "refresh_mic_menu", lambda: seen.append("mic"))
+    monkeypatch.setattr(va, "refresh_output_menu", lambda: seen.append("output"))
+
+    va._on_menu_about_to_show()
+
+    assert seen == ["reload", "mic", "output"]
+
+
+# --- SIGTERM must stop the app while the Qt event loop is running ---
+
+
+def test_stop_does_not_exit_the_process(monkeypatch):
+    """stop() runs inside a Qt slot or a deferred signal handler; sys.exit()
+    there does not unwind the event loop. run() owns process exit."""
+    va = voice_assistant.VoiceAssistant.__new__(voice_assistant.VoiceAssistant)
+    va.running = True
+    va.transcription_queue = voice_assistant.queue.Queue()
+    quits = []
+    va.app = types.SimpleNamespace(quit=lambda: quits.append("quit"))
+
+    va.stop()  # must not raise SystemExit
+
+    assert va.running is False
+    assert quits == ["quit"]
+    assert va.transcription_queue.get_nowait() is None, "worker must be woken to exit"

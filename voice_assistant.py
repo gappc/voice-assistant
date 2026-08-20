@@ -369,6 +369,41 @@ class VoiceAssistant:
         except Exception as e:
             print(f"Warning: error closing audio stream: {e}", file=sys.stderr)
 
+    def _reload_devices(self):
+        """Re-enumerate audio devices so hotplugged hardware shows up.
+
+        PortAudio builds its device list once, inside Pa_Initialize, and never
+        re-probes it — a microphone plugged in after startup stays invisible for
+        the life of the process. Tearing PortAudio down and back up is the only
+        way to refresh that list, and it invalidates open streams, so this is a
+        no-op while one is open."""
+        with self.lock:
+            if self.stream is not None:
+                return
+            try:
+                sd._terminate()
+                sd._initialize()
+            except Exception as e:
+                print(f"Warning: could not rescan audio devices: {e}", file=sys.stderr)
+                return
+
+            # Indices are only meaningful within one enumeration, so re-resolve
+            # through the stored names rather than trusting the old integers.
+            resolved = _resolve_device(self.preferred_input_name, self.get_input_devices())
+            self.current_device = (
+                resolved if resolved is not None else sd.default.device[0]
+            )
+            self.output_device = _resolve_device(
+                self.preferred_output_name, self.get_output_devices()
+            )
+            self.reader.set_output_device(self.output_device)
+
+    def _on_menu_about_to_show(self):
+        """Rescan and rebuild the device submenus each time the tray menu opens."""
+        self._reload_devices()
+        self.refresh_mic_menu()
+        self.refresh_output_menu()
+
     def _on_first_frame_timeout(self):
         """Opening a device can succeed and still deliver nothing — a PipeWire
         node whose card is locked by another process accepts the stream, then
@@ -517,11 +552,13 @@ class VoiceAssistant:
         self.running = False
         # Wake up transcription worker to exit
         self.transcription_queue.put(None)
-        # Small delay to allow threads to exit
-        time.sleep(0.5)
         if hasattr(self, 'app'):
+            # Ends app.exec(); run() then does the cleanup and exits. Calling
+            # sys.exit() here instead would raise inside the event loop.
             self.app.quit()
-        sys.exit(0)
+        else:
+            # Signalled before the tray came up: nothing else will exit for us.
+            sys.exit(0)
 
     def update_ui(self):
         self.ui_updater.update_signal.emit()
@@ -610,6 +647,16 @@ class VoiceAssistant:
         quit_action = self.tray_menu.addAction("Close Voice Assistant")
         quit_action.triggered.connect(self.stop)
         
+        # Rescan devices whenever the menu opens (hotplug).
+        self.tray_menu.aboutToShow.connect(self._on_menu_about_to_show)
+
+        # Python runs signal handlers only between bytecodes, and no bytecode
+        # executes while Qt owns the loop — without this pump SIGTERM is never
+        # delivered and the app can only be killed.
+        self._signal_pump = QTimer(self.app)
+        self._signal_pump.timeout.connect(lambda: None)
+        self._signal_pump.start(200)
+
         self.tray.setContextMenu(self.tray_menu)
         self.tray.activated.connect(self.on_tray_activated)
         self.tray.show()
