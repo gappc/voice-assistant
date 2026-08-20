@@ -182,8 +182,10 @@ dictation still fell back to a working device.
 (`sd._terminate()` / `sd._initialize()`) — the only way to refresh a list that
 is otherwise built once, inside `Pa_Initialize`. It runs from
 `_on_menu_about_to_show()`, wired to the tray menu's `aboutToShow`, so the
-picker rescans every time it opens. Because `Pa_Terminate` invalidates open
-streams, the rescan is a no-op while one is open.
+picker rescans every time it opens. Because
+`Pa_Terminate` invalidates every open stream — capture *and* playback — the
+rescan is a no-op while a recording is running or read-aloud is speaking.
+(Measured: re-initializing during playback truncated a 3.0 s tone at 0.45 s.)
 
 Indices are only meaningful within a single enumeration, so the rescan
 re-resolves through `preferred_input_name` / `preferred_output_name` rather

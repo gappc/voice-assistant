@@ -558,7 +558,6 @@ def test_reload_devices_reresolves_indices_from_preferred_names(monkeypatch):
     va.preferred_input_name = "alsa_input.usb-046d_Logitech_BRIO.analog-stereo"
     va.preferred_output_name = "Speakers"
     monkeypatch.setattr(va, "get_output_devices", lambda: [{"index": 2, "name": "Speakers"}])
-    va.reader = types.SimpleNamespace(set_output_device=lambda i: None, stop=lambda: None)
 
     va._reload_devices()
 
@@ -575,7 +574,6 @@ def test_reload_devices_falls_back_when_preferred_device_vanished(monkeypatch):
     va.preferred_input_name = "Unplugged USB Mic"
     va.preferred_output_name = None
     monkeypatch.setattr(va, "get_output_devices", lambda: [])
-    va.reader = types.SimpleNamespace(set_output_device=lambda i: None, stop=lambda: None)
 
     va._reload_devices()
 
@@ -612,3 +610,20 @@ def test_stop_does_not_exit_the_process(monkeypatch):
     assert va.running is False
     assert quits == ["quit"]
     assert va.transcription_queue.get_nowait() is None, "worker must be woken to exit"
+
+
+def test_reload_devices_skipped_while_reading_aloud(monkeypatch):
+    """Pa_Terminate aborts *output* streams too: a rescan during read-aloud
+    truncates the speech mid-sentence (measured: a 3.0 s tone cut at 0.45 s)."""
+    calls = []
+    monkeypatch.setattr(voice_assistant.sd, "_terminate", lambda: calls.append("terminate"))
+    monkeypatch.setattr(voice_assistant.sd, "_initialize", lambda: calls.append("initialize"))
+    va = _bare_assistant(monkeypatch, [])
+    va.preferred_input_name = None
+    va.preferred_output_name = None
+    va.reader = types.SimpleNamespace(is_reading=True, stop=lambda: None,
+                                      set_output_device=lambda idx: None)
+
+    va._reload_devices()
+
+    assert calls == []

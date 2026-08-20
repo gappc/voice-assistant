@@ -375,10 +375,10 @@ class VoiceAssistant:
         PortAudio builds its device list once, inside Pa_Initialize, and never
         re-probes it — a microphone plugged in after startup stays invisible for
         the life of the process. Tearing PortAudio down and back up is the only
-        way to refresh that list, and it invalidates open streams, so this is a
-        no-op while one is open."""
+        way to refresh that list, and it invalidates every open stream — capture
+        *and* playback — so this is a no-op while any audio is in flight."""
         with self.lock:
-            if self.stream is not None:
+            if self.stream is not None or self.reader.is_reading:
                 return
             try:
                 sd._terminate()
