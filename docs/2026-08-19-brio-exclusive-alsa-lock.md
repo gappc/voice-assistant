@@ -203,3 +203,16 @@ the signal arrives before the tray exists — nothing else would exit for us.)
 
 Verified: `kill -TERM` on the running assistant now exits in under a second,
 printing `Received signal 15, shutting down...`.
+
+**A recording that never ends.** One more path could hold the microphone open
+indefinitely: `listen_to_device()` starts on key-down and stops on key-up *from
+the same device path*, so if the keyboard is unplugged mid-press the key-up
+never arrives. Verified — the stream stayed open, `is_recording` stayed True,
+and a key-up from a second keyboard could not release it. With the fixes above
+the device is a shared PipeWire node, so this no longer locks the card
+system-wide, but it still pins the microphone and grows `audio_data` at
+~62 KB/s (≈230 MB/hour).
+
+Two releases now cover it: `listen_to_device()` releases in a `finally`, and
+`MAX_RECORDING_SECONDS` (300 s) is a backstop for a key-up that is merely lost.
+Both keep the audio recorded so far and queue it for transcription.

@@ -298,6 +298,7 @@ def _bare_assistant(monkeypatch, devices):
     va.notifications = []
     va._first_frame = voice_assistant.threading.Event()
     va._watchdog = None
+    va._max_duration = None
     monkeypatch.setattr(va, "get_input_devices", lambda: devices)
     monkeypatch.setattr(va, "_notify", lambda title, msg: va.notifications.append((title, msg)))
     monkeypatch.setattr(va, "update_ui", lambda: None)
@@ -600,14 +601,12 @@ def test_stop_does_not_exit_the_process(monkeypatch):
     """stop() runs inside a Qt slot or a deferred signal handler; sys.exit()
     there does not unwind the event loop. run() owns process exit."""
     va = voice_assistant.VoiceAssistant.__new__(voice_assistant.VoiceAssistant)
-    va.running = True
     va.transcription_queue = voice_assistant.queue.Queue()
     quits = []
     va.app = types.SimpleNamespace(quit=lambda: quits.append("quit"))
 
     va.stop()  # must not raise SystemExit
 
-    assert va.running is False
     assert quits == ["quit"]
     assert va.transcription_queue.get_nowait() is None, "worker must be woken to exit"
 
@@ -627,3 +626,90 @@ def test_reload_devices_skipped_while_reading_aloud(monkeypatch):
     va._reload_devices()
 
     assert calls == []
+
+
+# --- A recording must never outlive the key-up that should end it ---
+
+
+class _FakeInputDevice:
+    """evdev device whose read_loop yields events and then dies, the way a
+    keyboard does when it is unplugged mid-keystroke."""
+
+    def __init__(self, path, name, events, error=None):
+        self.path = path
+        self.name = name
+        self._events = events
+        self._error = error
+
+    def read_loop(self):
+        yield from self._events
+        if self._error:
+            raise self._error
+
+
+def _key_event(code, value):
+    return types.SimpleNamespace(type=_ecodes.EV_KEY, code=code, value=value)
+
+
+def test_recording_released_when_owning_keyboard_disconnects(monkeypatch):
+    """Key down, then the keyboard vanishes: the key-up never arrives, so
+    without a release the stream stays open and audio_data grows forever."""
+    va = _bare_assistant(monkeypatch, [{"index": 0, "name": "Mic"}])
+    va.current_device = 0
+    va.transcription_queue = voice_assistant.queue.Queue()
+    dev = _FakeInputDevice(
+        "/dev/input/eventA", "Vanishing Keyboard",
+        [_key_event(voice_assistant.TRIGGER_KEY_CODE, 1)],
+        error=OSError("device disconnected"),
+    )
+
+    va.listen_to_device(dev)
+
+    assert va.is_recording is False
+    assert va.stream is None
+    assert _FakeStream.instances[0].closed
+
+
+def test_recording_survives_a_clean_key_up(monkeypatch):
+    """The release must not fire on a normal press-and-release."""
+    va = _bare_assistant(monkeypatch, [{"index": 0, "name": "Mic"}])
+    va.current_device = 0
+    va.transcription_queue = voice_assistant.queue.Queue()
+    dev = _FakeInputDevice("/dev/input/eventA", "Normal Keyboard", [
+        _key_event(voice_assistant.TRIGGER_KEY_CODE, 1),
+        _key_event(voice_assistant.TRIGGER_KEY_CODE, 0),
+    ])
+
+    va.listen_to_device(dev)
+
+    assert va.is_recording is False
+    assert _FakeStream.instances[0].closed
+
+
+def test_recording_timeout_releases_a_stuck_recording(monkeypatch):
+    """Backstop for any missed key-up, not just a disconnect."""
+    va = _bare_assistant(monkeypatch, [{"index": 0, "name": "Mic"}])
+    va.current_device = 0
+    va.transcription_queue = voice_assistant.queue.Queue()
+    va.start_recording("/dev/input/eventA")
+
+    va._on_recording_timeout()
+
+    assert va.is_recording is False
+    assert va.stream is None
+    assert va.notifications, "the user should be told the recording was cut"
+
+
+def test_handle_signal_rearms_default_handlers(monkeypatch):
+    """After the first signal a second Ctrl+C must still force-quit, now that
+    stop() no longer calls sys.exit()."""
+    installed = []
+    monkeypatch.setattr(voice_assistant.signal, "signal",
+                        lambda sig, handler: installed.append(handler))
+    va = voice_assistant.VoiceAssistant.__new__(voice_assistant.VoiceAssistant)
+    va.transcription_queue = voice_assistant.queue.Queue()
+    va.app = types.SimpleNamespace(quit=lambda: None)
+
+    va.handle_signal(15, None)
+
+    assert installed == [voice_assistant.signal.SIG_DFL, voice_assistant.signal.SIG_DFL]

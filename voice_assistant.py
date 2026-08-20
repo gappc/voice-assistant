@@ -36,6 +36,9 @@ SPEED_PRESETS = {"Slow": 0.8, "Normal": 1.0, "Fast": 1.25}
 # A device can open successfully and still never deliver audio (e.g. a PipeWire
 # node whose card another process holds). Warn if nothing arrives by then.
 FIRST_FRAME_TIMEOUT = 1.5
+# Backstop for a key-up that never arrives (unplugged keyboard, lost event).
+# Without it the stream stays open and audio_data grows ~62 KB/s forever.
+MAX_RECORDING_SECONDS = 300
 
 
 def _resolve_device(id_or_name, devices):
@@ -103,6 +106,14 @@ def _migrate_raw_alsa_name(saved_name, devices):
 
 
 
+def _start_daemon_timer(seconds, callback):
+    """Fire `callback` once after `seconds`, without holding up interpreter exit."""
+    timer = threading.Timer(seconds, callback)
+    timer.daemon = True
+    timer.start()
+    return timer
+
+
 class _StartupSettings(NamedTuple):
     input_device: str | None
     output_device: str | None  # unresolved name; resolved via _resolve_device + get_output_devices()
@@ -146,11 +157,11 @@ class VoiceAssistant:
         self.lock = threading.Lock()
         # Track active recording to prevent duplicate starts from multiple devices
         self.active_recording_device = None
-        self.running = True
         self.window = None
         self.stream = None
         self._first_frame = threading.Event()
         self._watchdog = None
+        self._max_duration = None
 
         self._settings_path = (
             Path(settings_path) if settings_path else tray_settings.default_config_dir() / "settings.json"
@@ -187,7 +198,7 @@ class VoiceAssistant:
             on_state_change=self.update_ui,
         )
 
-    def record_callback(self, indata, frames, time, status):
+    def record_callback(self, indata, frames, time_info, status):
         if status:
             print(status, file=sys.stderr)
         self._first_frame.set()
@@ -218,28 +229,52 @@ class VoiceAssistant:
                 self.update_ui()
                 print(f"\nRecording started (Device: {device_path})...")
                 self.play_beep(frequency=600) # High beep for start
-                self._watchdog = threading.Timer(
+                self._watchdog = _start_daemon_timer(
                     FIRST_FRAME_TIMEOUT, self._on_first_frame_timeout
                 )
-                self._watchdog.daemon = True
-                self._watchdog.start()
+                self._max_duration = _start_daemon_timer(
+                    MAX_RECORDING_SECONDS, self._on_recording_timeout
+                )
 
     def stop_recording(self, device_path):
+        """Ends the recording started by `device_path`. Key-ups from other
+        keyboards are ignored so they cannot cut someone else's dictation."""
         with self.lock:
             if self.is_recording and self.active_recording_device == device_path:
-                self.is_recording = False
-                self.active_recording_device = None
-                if self._watchdog is not None:
-                    self._watchdog.cancel()
-                    self._watchdog = None
-                self._close_input_stream()
-                self.update_ui()
-                print("Recording stopped. Processing...")
-                self.play_beep(frequency=400) # Lower beep for stop
-                if self.audio_data:
-                    audio = np.concatenate(self.audio_data, axis=0).flatten()
-                    self.transcription_queue.put(audio)
-                self.audio_data = []
+                self._finish_recording()
+
+    def _finish_recording(self):
+        """Releases the microphone and queues the audio for transcription.
+        Caller must hold self.lock."""
+        self.is_recording = False
+        self.active_recording_device = None
+        for timer in (self._watchdog, self._max_duration):
+            if timer is not None:
+                timer.cancel()
+        self._watchdog = self._max_duration = None
+        self._close_input_stream()
+        self.update_ui()
+        print("Recording stopped. Processing...")
+        self.play_beep(frequency=400) # Lower beep for stop
+        if self.audio_data:
+            audio = np.concatenate(self.audio_data, axis=0).flatten()
+            self.transcription_queue.put(audio)
+        self.audio_data = []
+
+    def _on_recording_timeout(self):
+        """A recording this long means the key-up was lost. Release the mic
+        rather than hold it — and keep the audio, it is probably wanted."""
+        with self.lock:
+            if not self.is_recording:
+                return
+            print(f"Recording passed {MAX_RECORDING_SECONDS}s; releasing the "
+                  "microphone.", file=sys.stderr)
+            self._finish_recording()
+        self._notify(
+            "Recording ended automatically",
+            f"Dictation ran past {MAX_RECORDING_SECONDS}s. The trigger key was "
+            "probably released without the app seeing it.",
+        )
 
     def _transcription_worker(self):
         while True:
@@ -472,8 +507,12 @@ class VoiceAssistant:
                             self.stop_recording(device.path)
                     elif event.code == READ_KEY_CODE and event.value == 1:
                         self.on_read_key()
-        except (OSError, Exception) as e:
+        except Exception as e:
             print(f"Device error or disconnected: {device.name} - {e}")
+        finally:
+            # If the keyboard died mid-press the key-up will never arrive, so
+            # release anything this device is still holding.
+            self.stop_recording(device.path)
 
     def on_read_key(self):
         """Copilot key tapped: toggle read-aloud of the selection/clipboard."""
@@ -541,15 +580,15 @@ class VoiceAssistant:
             time.sleep(1)
 
     def handle_signal(self, signum, frame):
-        # Disable future signals to avoid double execution
-        signal.signal(signal.SIGINT, signal.SIG_IGN)
-        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+        # Restore the default handlers: stop() no longer exits the process, so
+        # a second Ctrl+C must still be able to force-quit if shutdown hangs.
+        signal.signal(signal.SIGINT, signal.SIG_DFL)
+        signal.signal(signal.SIGTERM, signal.SIG_DFL)
         print(f"\nReceived signal {signum}, shutting down...")
         self.stop()
 
     def stop(self):
         print("Stopping Voice Assistant...")
-        self.running = False
         # Wake up transcription worker to exit
         self.transcription_queue.put(None)
         if hasattr(self, 'app'):
