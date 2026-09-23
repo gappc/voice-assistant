@@ -23,3 +23,7 @@ voice-assistant = "voice_assistant:main"
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+[tool.pytest.ini_options]
+# tools/ holds manual scripts named test_*.py that type into the focused window.
+testpaths = ["tests"]
