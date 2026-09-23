@@ -5,6 +5,7 @@ A fast, privacy-respecting, and reliable local voice-to-text assistant designed 
 ## Features
 
 - **Push-to-Talk**: Hold **Right Alt** anywhere in the OS to record, release to transcribe and type. 
+- **Dictation Language**: Pick **English**, **German**, or **Auto-detect** from the tray menu's **Dictation Language** submenu (default: English). Auto-detect guesses per recording and can misfire on short phrases, so picking the language explicitly is more reliable.
 - **Read Aloud (Text-to-Speech)**: Tap the **Copilot key** (right of AltGr) to have your highlighted selection (or clipboard) read aloud with a natural local voice via [Kokoro-82M](https://huggingface.co/hexgrad/Kokoro-82M). Tap again to stop. Fully offline after a one-time model download.
 - **Wayland-Native Global Hotkeys**: Uses `evdev` to capture key events directly from the hardware, bypassing Wayland security limitations that block traditional listeners like `pynput`.
 - **Layout-Independent Text Injection**: Uses `wl-copy` and `ydotool` (Ctrl+Shift+V simulation by default) to paste the transcribed text. This ensures 100% accuracy for special characters and prevents mixed-up letters on non-US layouts (like Z/Y on German QWERTZ). The default Ctrl+Shift+V works in terminals as well as editors and IDEs; a tray menu toggle is provided to switch to plain Ctrl+V for apps that reserve Ctrl+Shift+V (e.g. LibreOffice "Paste Special").
@@ -65,7 +66,7 @@ uv run voice_assistant.py --test-read "Hello from the local voice assistant."
 ## Settings
 
 Every setting you change from the tray menu — input device, output device, voice,
-reading speed, and the Ctrl+Shift+V paste-mode toggle — is remembered across
+reading speed, dictation language, and the Ctrl+Shift+V paste-mode toggle — is remembered across
 restarts. Settings are stored as JSON in `~/.config/voice-assistant/settings.json`
 (respects `$XDG_CONFIG_HOME`). Delete the file to reset everything to defaults.
 

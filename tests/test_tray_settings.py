@@ -30,6 +30,7 @@ def test_save_then_load_round_trips(tmp_path):
         voice="en_US-sarah",
         speed=1.25,
         paste_with_shift=False,
+        stt_language="de",
     )
     tray_settings.save(original, path)
     assert tray_settings.load(path) == original
@@ -49,10 +50,11 @@ def test_load_non_object_json_returns_defaults(tmp_path):
 
 def test_load_wrong_shaped_fields_fall_back_to_defaults(tmp_path):
     path = tmp_path / "settings.json"
-    path.write_text(json.dumps({"speed": "fast", "paste_with_shift": "yes", "voice": 42}))
+    path.write_text(json.dumps({"speed": "fast", "paste_with_shift": "yes", "voice": 42, "stt_language": 7}))
     settings = tray_settings.load(path)
     assert settings.speed is None
     assert settings.paste_with_shift is True
+    assert settings.stt_language is None
     assert settings.voice is None
 
 

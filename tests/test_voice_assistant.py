@@ -108,6 +108,66 @@ def test_resolve_startup_settings_defaults_when_nothing_saved(tmp_path):
     assert result.voice == voice_assistant.DEFAULT_VOICE
     assert result.speed == voice_assistant.READ_SPEED
     assert result.paste_with_shift is True
+    assert result.stt_language == "en"
+
+
+def test_resolve_startup_settings_unknown_stt_language_falls_back_to_default(tmp_path):
+    path = tmp_path / "settings.json"
+    voice_assistant.tray_settings.save(
+        voice_assistant.tray_settings.TraySettings(stt_language="xx"), path
+    )
+    result = voice_assistant._resolve_startup_settings(None, path)
+    assert result.stt_language == voice_assistant.DEFAULT_STT_LANGUAGE
+
+
+def test_resolve_startup_settings_keeps_saved_stt_language(tmp_path):
+    path = tmp_path / "settings.json"
+    voice_assistant.tray_settings.save(
+        voice_assistant.tray_settings.TraySettings(stt_language="de"), path
+    )
+    result = voice_assistant._resolve_startup_settings(None, path)
+    assert result.stt_language == "de"
+
+
+class _FakeWhisper:
+    def __init__(self):
+        self.calls = []
+
+    def transcribe(self, audio, **kwargs):
+        self.calls.append(kwargs)
+        return [types.SimpleNamespace(text=" Hallo Welt ")], None
+
+
+def test_transcribe_passes_selected_language():
+    va = voice_assistant.VoiceAssistant.__new__(voice_assistant.VoiceAssistant)
+    va.model = _FakeWhisper()
+    va.stt_language = "de"
+    assert va.transcribe(object()) == "Hallo Welt"
+    assert va.model.calls[0]["language"] == "de"
+
+
+def test_transcribe_auto_lets_whisper_detect_language():
+    va = voice_assistant.VoiceAssistant.__new__(voice_assistant.VoiceAssistant)
+    va.model = _FakeWhisper()
+    va.stt_language = "auto"
+    va.transcribe(object())
+    assert va.model.calls[0]["language"] is None
+
+
+def test_set_stt_language_persists(monkeypatch, tmp_path):
+    va = voice_assistant.VoiceAssistant.__new__(voice_assistant.VoiceAssistant)
+    va._settings_path = tmp_path / "settings.json"
+    va.preferred_input_name = None
+    va.preferred_output_name = None
+    va.paste_with_shift = True
+    va.stt_language = "en"
+    va.reader = _FakeReader(voice_assistant.DEFAULT_VOICE, voice_assistant.READ_SPEED)
+
+    va.set_stt_language("de")
+
+    assert va.stt_language == "de"
+    saved = voice_assistant.tray_settings.load(va._settings_path)
+    assert saved.stt_language == "de"
 
 
 class _FakeReader:
@@ -133,6 +193,7 @@ def test_save_settings_snapshots_current_state(monkeypatch, tmp_path):
     va.preferred_input_name = "USB Microphone"
     va.preferred_output_name = "Speakers"
     va.paste_with_shift = False
+    va.stt_language = "de"
     va.reader = _FakeReader("en_US-sarah", 1.25)
     monkeypatch.setattr(va, "get_input_devices", lambda: [{"index": 3, "name": "USB Microphone"}])
     monkeypatch.setattr(va, "get_output_devices", lambda: [{"index": 1, "name": "Speakers"}])
@@ -146,6 +207,7 @@ def test_save_settings_snapshots_current_state(monkeypatch, tmp_path):
         voice="en_US-sarah",
         speed=1.25,
         paste_with_shift=False,
+        stt_language="de",
     )
 
 
@@ -156,6 +218,7 @@ def test_set_paste_with_shift_persists(monkeypatch, tmp_path):
     va.output_device = None
     va.preferred_input_name = None
     va.preferred_output_name = None
+    va.stt_language = voice_assistant.DEFAULT_STT_LANGUAGE
     va.reader = _FakeReader(voice_assistant.DEFAULT_VOICE, voice_assistant.READ_SPEED)
     monkeypatch.setattr(va, "get_input_devices", lambda: [])
     monkeypatch.setattr(va, "get_output_devices", lambda: [])
@@ -175,6 +238,7 @@ def test_set_speed_persists(monkeypatch, tmp_path):
     va.preferred_input_name = None
     va.preferred_output_name = None
     va.paste_with_shift = True
+    va.stt_language = voice_assistant.DEFAULT_STT_LANGUAGE
     va.reader = _FakeReader(voice_assistant.DEFAULT_VOICE, voice_assistant.READ_SPEED)
     monkeypatch.setattr(va, "get_input_devices", lambda: [])
     monkeypatch.setattr(va, "get_output_devices", lambda: [])
@@ -194,6 +258,7 @@ def test_on_select_voice_persists_on_success(monkeypatch, tmp_path):
     va.preferred_input_name = None
     va.preferred_output_name = None
     va.paste_with_shift = True
+    va.stt_language = voice_assistant.DEFAULT_STT_LANGUAGE
     va.reader = _FakeReader(voice_assistant.DEFAULT_VOICE, voice_assistant.READ_SPEED)
     monkeypatch.setattr(va, "get_input_devices", lambda: [])
     monkeypatch.setattr(va, "get_output_devices", lambda: [])
@@ -446,6 +511,7 @@ def _persisting_assistant(monkeypatch, tmp_path, in_devices, out_devices=()):
     va = _bare_assistant(monkeypatch, in_devices)
     va._settings_path = tmp_path / "settings.json"
     va.paste_with_shift = True
+    va.stt_language = voice_assistant.DEFAULT_STT_LANGUAGE
     va.reader = _FakeReader(voice_assistant.DEFAULT_VOICE, voice_assistant.READ_SPEED)
     va.reader.stop = lambda: None
     va.reader.set_output_device = lambda idx: None
@@ -502,6 +568,7 @@ def test_set_output_device_resolves_by_name(monkeypatch, tmp_path):
     va.preferred_input_name = None
     va.preferred_output_name = None
     va.paste_with_shift = True
+    va.stt_language = voice_assistant.DEFAULT_STT_LANGUAGE
     va.reader = _FakeReader(voice_assistant.DEFAULT_VOICE, voice_assistant.READ_SPEED)
     va.reader.set_output_device = lambda idx: None
     va.set_output_device("speakers")
