@@ -88,6 +88,7 @@ You can then search for "Voice Assistant" in your application menu, or add it to
 
 - **No Key Detection**: If the script boots up but holding Right Alt does nothing, make sure your user is part of the `input` group. (You may need to log out and log back in after joining).
 - **Read-aloud does nothing**: The Copilot key emits `Meta+Shift+F23`; the assistant listens for `F23`. Confirm your key sends it with `uv run key_detector.py` (tap the Copilot key, look for `KEY_F23`). If nothing is selected and the clipboard is empty, you'll hear a short low beep instead.
+- **Recordings produce no text**: Each recording logs `Audio: <length>, peak <level>, gain <boost>`. Recordings are centred (DC offset removed) and quiet ones are boosted up to 10×, which rescues built-in laptop mics that deliver very quiet audio on a DC offset. A peak well below ~0.01 while you were speaking means the mic is barely picking you up: pick another device in the tray, or raise the capture/boost level in `alsamixer` (F4).
 - **Text isn't pasting**:
     - The assistant uses `wl-copy` and `ydotool` to simulate a Ctrl+Shift+V paste by default (works in terminals and most editors). Ensure both are installed. If your target app does not accept Ctrl+Shift+V (e.g. LibreOffice), toggle off "Use Ctrl+Shift+V (terminal-compatible)" in the tray menu to fall back to plain Ctrl+V.
     - **Test Injection**: Run `uv run voice_assistant.py --test-injection` to verify if the script can type into a focused window without recording.

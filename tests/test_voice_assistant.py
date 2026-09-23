@@ -135,6 +135,7 @@ class _FakeWhisper:
 
     def transcribe(self, audio, **kwargs):
         self.calls.append(kwargs)
+        self.audio = audio
         return [types.SimpleNamespace(text=" Hallo Welt ")], None
 
 
@@ -142,7 +143,7 @@ def test_transcribe_passes_selected_language():
     va = voice_assistant.VoiceAssistant.__new__(voice_assistant.VoiceAssistant)
     va.model = _FakeWhisper()
     va.stt_language = "de"
-    assert va.transcribe(object()) == "Hallo Welt"
+    assert va.transcribe(_tone(0.1)) == "Hallo Welt"
     assert va.model.calls[0]["language"] == "de"
 
 
@@ -150,8 +151,58 @@ def test_transcribe_auto_lets_whisper_detect_language():
     va = voice_assistant.VoiceAssistant.__new__(voice_assistant.VoiceAssistant)
     va.model = _FakeWhisper()
     va.stt_language = "auto"
-    va.transcribe(object())
+    va.transcribe(_tone(0.1))
     assert va.model.calls[0]["language"] is None
+
+
+# --- Audio conditioning: laptop mics deliver quiet audio on a DC offset ---
+
+
+def _tone(peak, offset=0.0, seconds=1.0):
+    t = voice_assistant.np.arange(int(voice_assistant.SAMPLERATE * seconds)) / voice_assistant.SAMPLERATE
+    return (offset + peak * voice_assistant.np.sin(2 * voice_assistant.np.pi * 220 * t)).astype(
+        voice_assistant.np.float32
+    )
+
+
+def test_condition_audio_removes_dc_offset():
+    """The built-in mic sits on a ~0.25 offset; raw, Whisper's VAD hears nothing."""
+    out, _, _ = voice_assistant._condition_audio(_tone(0.05, offset=0.25))
+    assert abs(float(out.mean())) < 1e-3
+
+
+def test_condition_audio_boosts_quiet_speech_to_target():
+    out, peak, gain = voice_assistant._condition_audio(_tone(0.1, offset=0.25))
+    assert abs(peak - 0.1) < 1e-3
+    assert abs(gain - voice_assistant.TARGET_PEAK / 0.1) < 1e-3
+    assert abs(float(abs(out).max()) - voice_assistant.TARGET_PEAK) < 1e-3
+
+
+def test_condition_audio_caps_gain_so_noise_is_not_blown_up():
+    _, _, gain = voice_assistant._condition_audio(_tone(0.0005))
+    assert gain == voice_assistant.MAX_GAIN
+
+
+def test_condition_audio_leaves_loud_audio_unscaled():
+    loud = _tone(0.8)
+    out, _, gain = voice_assistant._condition_audio(loud)
+    assert gain == 1.0
+    assert voice_assistant.np.allclose(out, loud - loud.mean())
+
+
+def test_condition_audio_handles_pure_silence():
+    out, peak, gain = voice_assistant._condition_audio(voice_assistant.np.zeros(1600, dtype="float32"))
+    assert peak == 0.0 and gain == voice_assistant.MAX_GAIN
+    assert not voice_assistant.np.isnan(out).any()
+
+
+def test_transcribe_feeds_conditioned_audio_to_whisper():
+    va = voice_assistant.VoiceAssistant.__new__(voice_assistant.VoiceAssistant)
+    va.model = _FakeWhisper()
+    va.stt_language = "en"
+    va.transcribe(_tone(0.05, offset=0.25))
+    assert abs(float(va.model.audio.mean())) < 1e-3
+    assert va.model.audio.dtype == voice_assistant.np.float32
 
 
 def test_set_stt_language_persists(monkeypatch, tmp_path):

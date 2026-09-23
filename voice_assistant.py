@@ -37,6 +37,10 @@ SPEED_PRESETS = {"Slow": 0.8, "Normal": 1.0, "Fast": 1.25}
 # per recording, which is unreliable on short phrases with the base model.
 STT_LANGUAGES = {"en": "English", "de": "German", "auto": "Auto-detect"}
 DEFAULT_STT_LANGUAGE = "en"
+# Audio conditioning before transcription. The laptop's built-in mic delivers
+# speech ~0.01 deep on a ~0.25 DC offset, which Whisper's VAD drops entirely.
+TARGET_PEAK = 0.5  # boost quiet recordings to this peak
+MAX_GAIN = 10.0    # never boost more than this, so near-silence stays quiet
 # A device can open successfully and still never deliver audio (e.g. a PipeWire
 # node whose card another process holds). Warn if nothing arrives by then.
 FIRST_FRAME_TIMEOUT = 1.5
@@ -108,6 +112,16 @@ def _migrate_raw_alsa_name(saved_name, devices):
             return d["name"]
     return saved_name
 
+
+
+def _condition_audio(audio):
+    """Remove DC offset and boost quiet audio toward TARGET_PEAK (never
+    attenuate, never above MAX_GAIN). Returns (audio, peak, gain), where
+    peak is measured after offset removal."""
+    centered = audio - audio.mean()
+    peak = float(np.abs(centered).max()) if centered.size else 0.0
+    gain = MAX_GAIN if peak == 0 else min(max(TARGET_PEAK / peak, 1.0), MAX_GAIN)
+    return (centered * gain).astype(np.float32), peak, gain
 
 
 def _start_daemon_timer(seconds, callback):
@@ -304,8 +318,12 @@ class VoiceAssistant:
     def transcribe(self, audio):
         # None lets Whisper detect the language; Silero VAD improves accuracy
         language = None if self.stt_language == "auto" else self.stt_language
+        audio, peak, gain = _condition_audio(audio)
+        print(f"Audio: {len(audio) / SAMPLERATE:.1f}s, peak {peak:.4f}, gain {gain:.1f}x")
         segments, info = self.model.transcribe(audio, beam_size=5, language=language, vad_filter=True)
         text = " ".join([segment.text for segment in segments]).strip()
+        if not text:
+            print("No speech recognized.")
         return text
 
     def inject_text(self, text):
