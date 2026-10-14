@@ -120,9 +120,10 @@ def _declare(lib):
     return lib
 
 
-def load_library(stt_dir):
-    """Load the Vulkan build, or the CPU build if the Vulkan one can't load."""
-    for variant in LIBRARY_SOURCES:
+def load_library(stt_dir, variants=tuple(LIBRARY_SOURCES)):
+    """Load the first of `variants` that loads: by default the Vulkan build,
+    or the CPU build if the Vulkan one can't load."""
+    for variant in variants:
         path = ensure_library(variant, stt_dir)
         try:
             return _declare(ctypes.CDLL(str(path)))

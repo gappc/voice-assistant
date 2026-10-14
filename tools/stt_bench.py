@@ -9,7 +9,7 @@ per model, feeds every clip through the app's _condition_audio(), and reports
 load time, latency, CPU time, peak RAM and word error rate against the prompt.
 
 Parakeet v3 runs on three runtimes: onnx-asr, sherpa-onnx and parakeet.cpp
-(ggml, prebuilt release library loaded with ctypes, on CPU or Vulkan). Models
+(the app's speech_recognizer loader, with the CPU or Vulkan build forced). Models
 and libraries the pip packages don't fetch themselves are downloaded to
 ~/.cache/voice-assistant/ on first use.
 """
@@ -50,9 +50,6 @@ PROMPTS = [
 CACHE_DIR = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "voice-assistant"
 SHERPA_MODEL_URL = ("https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/"
                     "sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8.tar.bz2")
-PCPP_VERSION = "v0.6.1"
-PCPP_LIB_URL = ("https://github.com/mudler/parakeet.cpp/releases/download/"
-                f"{PCPP_VERSION}/parakeet-{PCPP_VERSION}-lib-linux-{{variant}}-x64.tar.gz")
 PCPP_MODEL_URL = "https://huggingface.co/mudler/parakeet-cpp-gguf/resolve/main/{file}"
 
 # name -> (backend, model id, extra options)
@@ -163,21 +160,6 @@ def fetch_tarball(url, dest_dir):
     return dest_dir
 
 
-def load_parakeet_cpp(variant):
-    """ctypes handle to the prebuilt libparakeet.so (variant: cpu or vulkan)."""
-    root = fetch_tarball(PCPP_LIB_URL.format(variant=variant),
-                         CACHE_DIR / "parakeet-cpp" / f"{PCPP_VERSION}-{variant}")
-    lib = ctypes.CDLL(str(next(root.rglob("libparakeet.so"))))
-    lib.parakeet_capi_load.restype = ctypes.c_void_p
-    lib.parakeet_capi_load.argtypes = [ctypes.c_char_p]
-    lib.parakeet_capi_load_error.restype = ctypes.c_char_p
-    lib.parakeet_capi_transcribe_pcm.restype = ctypes.c_void_p
-    lib.parakeet_capi_transcribe_pcm.argtypes = [
-        ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int, ctypes.c_int, ctypes.c_int]
-    lib.parakeet_capi_free_string.argtypes = [ctypes.c_void_p]
-    return lib
-
-
 # --- Benchmark worker (one model per process) ----------------------------
 
 def rss_mb():
@@ -218,7 +200,9 @@ def worker(args):
             model.decode_stream(stream)
             return stream.result.text.strip()
     elif backend == "parakeet.cpp":
-        lib = load_parakeet_cpp(opts["variant"])
+        import speech_recognizer
+        # The app's loader: same pinned, checksum-verified release, one variant forced.
+        lib = speech_recognizer.load_library(CACHE_DIR / "parakeet-cpp", variants=(opts["variant"],))
         gguf = fetch(PCPP_MODEL_URL.format(file=model_id), CACHE_DIR / "parakeet-cpp" / "models" / model_id)
         ctx = lib.parakeet_capi_load(str(gguf).encode())
         if not ctx:

@@ -57,6 +57,7 @@ The Vulkan build picks the first GPU it finds. To force the CPU instead (about
 0.2 s per phrase, briefly using all cores), start with `PARAKEET_DEVICE=cpu`.
 
 `tools/stt_bench.py` compares recognizers on your own recordings; see its docstring.
+Why Parakeet replaced Whisper, with measurements: [docs/2026-10-14-speech-recognition-parakeet.md](docs/2026-10-14-speech-recognition-parakeet.md).
 
 ## Read Aloud
 
