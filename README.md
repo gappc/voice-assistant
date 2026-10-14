@@ -1,16 +1,16 @@
 # Local Voice Assistant
 
-A fast, privacy-respecting, and reliable local voice-to-text assistant designed specifically for Linux (Wayland). It records your voice while you hold a global hotkey, transcribes it locally using Whisper, and injects the text perfectly anywhere your cursor is, regardless of your keyboard layout.
+A fast, privacy-respecting, and reliable local voice-to-text assistant designed specifically for Linux (Wayland). It records your voice while you hold a global hotkey, transcribes it locally using [Parakeet TDT 0.6B v3](https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3), and injects the text perfectly anywhere your cursor is, regardless of your keyboard layout.
 
 ## Features
 
 - **Push-to-Talk**: Hold **Right Alt** anywhere in the OS to record, release to transcribe and type. 
-- **Dictation Language**: Pick **English**, **German**, or **Auto-detect** from the tray menu's **Dictation Language** submenu (default: English). Auto-detect guesses per recording and can misfire on short phrases, so picking the language explicitly is more reliable.
+- **Multilingual Dictation**: English, German and 23 other European languages, detected per recording; there is no language to pick.
 - **Read Aloud (Text-to-Speech)**: Tap the **Copilot key** (right of AltGr) to have your highlighted selection (or clipboard) read aloud with a natural local voice via [Kokoro-82M](https://huggingface.co/hexgrad/Kokoro-82M). Tap again to stop. Fully offline after a one-time model download.
 - **Wayland-Native Global Hotkeys**: Uses `evdev` to capture key events directly from the hardware, bypassing Wayland security limitations that block traditional listeners like `pynput`.
 - **Layout-Independent Text Injection**: Uses `wl-copy` and `ydotool` (Ctrl+Shift+V simulation by default) to paste the transcribed text. This ensures 100% accuracy for special characters and prevents mixed-up letters on non-US layouts (like Z/Y on German QWERTZ). The default Ctrl+Shift+V works in terminals as well as editors and IDEs; a tray menu toggle is provided to switch to plain Ctrl+V for apps that reserve Ctrl+Shift+V (e.g. LibreOffice "Paste Special").
 - **Audio Feedback**: Plays subtle beeps indicating when recording starts and stops—no need to look at a terminal or status bar.
-- **Voice Activity Detection (VAD)**: Built-in Silero VAD filtering ensures cleaner, more accurate transcriptions by trimming silent audio.
+- **GPU Transcription**: Runs on the GPU through Vulkan (including AMD/Intel integrated graphics) via [parakeet.cpp](https://github.com/mudler/parakeet.cpp), taking ~0.1 s per phrase with almost no CPU use, and falls back to the CPU when no Vulkan device is found. Silence and key clicks produce no text.
 - **Background Service & Desktop Integration**: Includes a simple `.desktop` file for easy launching from your app menu or startup applications.
 
 ## Requirements
@@ -32,7 +32,7 @@ This project uses `uv` for seamless, lightning-fast Python dependency management
    ```bash
    uv run voice_assistant.py
    ```
-   `uv` will automatically create an isolated virtual environment and fetch all python dependencies (`faster-whisper`, `sounddevice`, `evdev`, etc.).
+   `uv` will automatically create an isolated virtual environment and fetch all python dependencies (`sounddevice`, `evdev`, etc.).
 
 ## Usage
 
@@ -45,6 +45,18 @@ This project uses `uv` for seamless, lightning-fast Python dependency management
 4. Hold the **Right Alt** (AltGr) key. You will hear a high beep.
 5. Speak your text.
 6. Release the key. You will hear a lower beep, and your transcribed text will be instantly pasted.
+
+## Speech Recognition
+
+On first start the assistant downloads the parakeet.cpp library (~60 MB) and the
+quantized Parakeet model (~675 MB), checks their SHA-256 checksums, and caches them
+under `~/.local/share/voice-assistant/stt/`. The model stays loaded while the
+assistant runs: about 1 GB of memory, held by the GPU on integrated graphics.
+
+The Vulkan build picks the first GPU it finds. To force the CPU instead (about
+0.2 s per phrase, briefly using all cores), start with `PARAKEET_DEVICE=cpu`.
+
+`tools/stt_bench.py` compares recognizers on your own recordings; see its docstring.
 
 ## Read Aloud
 
@@ -66,7 +78,7 @@ uv run voice_assistant.py --test-read "Hello from the local voice assistant."
 ## Settings
 
 Every setting you change from the tray menu — input device, output device, voice,
-reading speed, dictation language, and the Ctrl+Shift+V paste-mode toggle — is remembered across
+reading speed, and the Ctrl+Shift+V paste-mode toggle — is remembered across
 restarts. Settings are stored as JSON in `~/.config/voice-assistant/settings.json`
 (respects `$XDG_CONFIG_HOME`). Delete the file to reset everything to defaults.
 

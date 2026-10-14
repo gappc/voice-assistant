@@ -1,4 +1,4 @@
-"""Persisted tray settings (voice, speed, devices, paste mode, dictation language).
+"""Persisted tray settings (voice, speed, devices, paste mode).
 
 Deliberately independent of speech_reader.py / voice_assistant.py: no
 VOICE_CATALOG or DEFAULT_VOICE import, so there is no circular import and this
@@ -29,7 +29,6 @@ class TraySettings:
     voice: str | None = None          # VOICE_CATALOG key
     speed: float | None = None
     paste_with_shift: bool = True
-    stt_language: str | None = None   # STT_LANGUAGES code ("en", "de", "auto")
 
 
 def load(path):
@@ -54,7 +53,6 @@ def load(path):
         voice=_str_or_default(raw.get("voice")),
         speed=_float_or_default(raw.get("speed")),
         paste_with_shift=_bool_or_default(raw.get("paste_with_shift")),
-        stt_language=_str_or_default(raw.get("stt_language")),
     )
 
 

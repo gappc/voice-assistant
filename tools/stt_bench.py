@@ -1,7 +1,7 @@
 """Benchmark speech-to-text models on your own recordings.
 
     uv run tools/stt_bench.py record [--device N]   # read prompts into the mic
-    uv run --with 'onnx-asr[hub]' --with sherpa-onnx tools/stt_bench.py run [--models ...] [--threads N]
+    uv run --with faster-whisper --with 'onnx-asr[hub]' --with sherpa-onnx tools/stt_bench.py run [--models ...] [--threads N]
 
 `record` saves raw (unconditioned) 16 kHz mono clips plus their reference
 text. `run` loads each model in its own subprocess, so peak RAM is measured

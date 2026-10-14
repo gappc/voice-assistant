@@ -12,7 +12,6 @@ from typing import NamedTuple
 
 import numpy as np
 import sounddevice as sd
-from faster_whisper import WhisperModel
 from PySide6.QtWidgets import QApplication, QSystemTrayIcon, QMenu
 from PySide6.QtGui import QIcon, QAction, QCursor, QPixmap, QPainter, QColor, QBrush, QActionGroup
 from PySide6.QtCore import QTimer, Qt, Signal, QObject, Slot
@@ -20,12 +19,10 @@ from evdev import InputDevice, categorize, ecodes, list_devices
 
 import tray_settings
 from speech_reader import SpeechReader, VOICE_CATALOG, DEFAULT_VOICE
+from speech_recognizer import SpeechRecognizer
 from text_source import get_text_to_read
 
 # --- Configuration ---
-MODEL_SIZE = "base"
-DEVICE = "cpu"
-COMPUTE_TYPE = "int8"
 CHANNELS = 1
 SAMPLERATE = 16000
 TRIGGER_KEY_CODE = ecodes.KEY_RIGHTALT  # Scan code 100
@@ -33,12 +30,8 @@ KEYBOARD_LAYOUT = "de" # Set to "de" for German, "us" for US
 READ_KEY_CODE = ecodes.KEY_F23  # Copilot key emits Meta+Shift+F23; F23 is the tell
 READ_SPEED = 1.0  # playback speed multiplier (1.0 = normal; >1 faster, <1 slower)
 SPEED_PRESETS = {"Slow": 0.8, "Normal": 1.0, "Fast": 1.25}
-# Dictation language: saved code -> tray label. "auto" lets Whisper detect it
-# per recording, which is unreliable on short phrases with the base model.
-STT_LANGUAGES = {"en": "English", "de": "German", "auto": "Auto-detect"}
-DEFAULT_STT_LANGUAGE = "en"
 # Audio conditioning before transcription. The laptop's built-in mic delivers
-# speech ~0.01 deep on a ~0.25 DC offset, which Whisper's VAD drops entirely.
+# speech ~0.01 deep on a ~0.25 DC offset, which Whisper's VAD dropped entirely.
 TARGET_PEAK = 0.5  # boost quiet recordings to this peak
 MAX_GAIN = 10.0    # never boost more than this, so near-silence stays quiet
 # A device can open successfully and still never deliver audio (e.g. a PipeWire
@@ -138,20 +131,15 @@ class _StartupSettings(NamedTuple):
     voice: str
     speed: float
     paste_with_shift: bool
-    stt_language: str
 
 
 def _resolve_startup_settings(initial_device, settings_path):
     """Merge a CLI-provided initial_device with saved tray settings. The CLI
     value wins when given; otherwise the saved value is used, falling back to
-    the hardcoded default. Never returns a voice absent from VOICE_CATALOG
-    or a dictation language absent from STT_LANGUAGES."""
+    the hardcoded default. Never returns a voice absent from VOICE_CATALOG."""
     settings = tray_settings.load(settings_path)
     voice = settings.voice if settings.voice in VOICE_CATALOG else DEFAULT_VOICE
     speed = settings.speed if settings.speed is not None else READ_SPEED
-    stt_language = (
-        settings.stt_language if settings.stt_language in STT_LANGUAGES else DEFAULT_STT_LANGUAGE
-    )
     input_device = initial_device if initial_device is not None else settings.input_device
     return _StartupSettings(
         input_device=input_device,
@@ -159,7 +147,6 @@ def _resolve_startup_settings(initial_device, settings_path):
         voice=voice,
         speed=speed,
         paste_with_shift=settings.paste_with_shift,
-        stt_language=stt_language,
     )
 
 
@@ -170,8 +157,8 @@ class UIUpdater(QObject):
 
 class VoiceAssistant:
     def __init__(self, initial_device=None, settings_path=None):
-        print(f"Loading Whisper model '{MODEL_SIZE}'...")
-        self.model = WhisperModel(MODEL_SIZE, device=DEVICE, compute_type=COMPUTE_TYPE)
+        print("Loading speech recognizer (Parakeet v3)...")
+        self.model = SpeechRecognizer()
         self.is_recording = False
         self.audio_data = []
         self.transcription_queue = queue.Queue()
@@ -204,7 +191,6 @@ class VoiceAssistant:
         # Ctrl+Shift+V works in terminals and most editors; flip off for apps
         # that reserve it (e.g. LibreOffice "Paste Special").
         self.paste_with_shift = startup.paste_with_shift
-        self.stt_language = startup.stt_language
 
         # Setup signal handlers
         signal.signal(signal.SIGINT, self.handle_signal)
@@ -316,12 +302,11 @@ class VoiceAssistant:
             self.transcription_queue.task_done()
 
     def transcribe(self, audio):
-        # None lets Whisper detect the language; Silero VAD improves accuracy
-        language = None if self.stt_language == "auto" else self.stt_language
+        # Parakeet detects the language per recording and returns "" for
+        # silence or noise, so no language setting or VAD pass is needed.
         audio, peak, gain = _condition_audio(audio)
         print(f"Audio: {len(audio) / SAMPLERATE:.1f}s, peak {peak:.4f}, gain {gain:.1f}x")
-        segments, info = self.model.transcribe(audio, beam_size=5, language=language, vad_filter=True)
-        text = " ".join([segment.text for segment in segments]).strip()
+        text = self.model.transcribe(audio)
         if not text:
             print("No speech recognized.")
         return text
@@ -499,7 +484,6 @@ class VoiceAssistant:
                     voice=self.reader._voice_name,
                     speed=self.reader._speed,
                     paste_with_shift=self.paste_with_shift,
-                    stt_language=self.stt_language,
                 ),
                 self._settings_path,
             )
@@ -591,11 +575,6 @@ class VoiceAssistant:
     def set_speed(self, scale):
         """Tray-triggered speed change: apply it and persist the choice."""
         self.reader.set_speed(scale)
-        self._save_settings()
-
-    def set_stt_language(self, code):
-        """Tray-triggered dictation language change: apply it and persist the choice."""
-        self.stt_language = code
         self._save_settings()
 
     def set_output_device(self, device_id_or_name):
@@ -711,10 +690,6 @@ class VoiceAssistant:
         self.speed_menu = self.tray_menu.addMenu("Reading Speed")
         self.build_speed_menu()
 
-        # Dictation (speech-to-text) language menu
-        self.stt_language_menu = self.tray_menu.addMenu("Dictation Language")
-        self.build_stt_language_menu()
-
         self.tray_menu.addSeparator()
 
         paste_action = self.tray_menu.addAction("Use Ctrl+Shift+V (terminal-compatible)")
@@ -817,18 +792,6 @@ class VoiceAssistant:
                 action.setChecked(True)
             action.triggered.connect(lambda checked, s=scale: self.set_speed(s))
             self.speed_menu.addAction(action)
-            group.addAction(action)
-
-    def build_stt_language_menu(self):
-        """Populates the dictation-language submenu."""
-        self.stt_language_menu.clear()
-        group = QActionGroup(self.stt_language_menu)
-        for code, label in STT_LANGUAGES.items():
-            action = QAction(label, self.stt_language_menu, checkable=True)
-            if code == self.stt_language:
-                action.setChecked(True)
-            action.triggered.connect(lambda checked, c=code: self.set_stt_language(c))
-            self.stt_language_menu.addAction(action)
             group.addAction(action)
 
     def on_select_voice(self, name):
