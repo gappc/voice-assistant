@@ -1,21 +1,29 @@
 """Benchmark speech-to-text models on your own recordings.
 
     uv run tools/stt_bench.py record [--device N]   # read prompts into the mic
-    uv run --with 'onnx-asr[hub]' tools/stt_bench.py run [--models ...] [--threads N]
+    uv run --with 'onnx-asr[hub]' --with sherpa-onnx tools/stt_bench.py run [--models ...] [--threads N]
 
 `record` saves raw (unconditioned) 16 kHz mono clips plus their reference
 text. `run` loads each model in its own subprocess, so peak RAM is measured
 per model, feeds every clip through the app's _condition_audio(), and reports
 load time, latency, CPU time, peak RAM and word error rate against the prompt.
+
+Parakeet v3 runs on three runtimes: onnx-asr, sherpa-onnx and parakeet.cpp
+(ggml, prebuilt release library loaded with ctypes, on CPU or Vulkan). Models
+and libraries the pip packages don't fetch themselves are downloaded to
+~/.cache/voice-assistant/ on first use.
 """
 import argparse
+import ctypes
 import json
 import os
 import re
 import resource
 import subprocess
 import sys
+import tarfile
 import time
+import urllib.request
 import wave
 from pathlib import Path
 
@@ -39,6 +47,14 @@ PROMPTS = [
     ("de", "Bitte prüfe, ob der Server nach dem Update wieder normal läuft."),
 ]
 
+CACHE_DIR = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "voice-assistant"
+SHERPA_MODEL_URL = ("https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/"
+                    "sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8.tar.bz2")
+PCPP_VERSION = "v0.6.1"
+PCPP_LIB_URL = ("https://github.com/mudler/parakeet.cpp/releases/download/"
+                f"{PCPP_VERSION}/parakeet-{PCPP_VERSION}-lib-linux-{{variant}}-x64.tar.gz")
+PCPP_MODEL_URL = "https://huggingface.co/mudler/parakeet-cpp-gguf/resolve/main/{file}"
+
 # name -> (backend, model id, extra options)
 MODELS = {
     "whisper-base":     ("faster-whisper", "base", {}),
@@ -46,8 +62,12 @@ MODELS = {
     "whisper-turbo":    ("faster-whisper", "large-v3-turbo", {}),
     "parakeet-v3":      ("onnx-asr", "nemo-parakeet-tdt-0.6b-v3", {"quantization": "int8"}),
     "canary-1b-v2":     ("onnx-asr", "nemo-canary-1b-v2", {"quantization": "int8"}),
+    "sherpa-v3":        ("sherpa-onnx", "sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8", {}),
+    "pcpp-v3-q8":       ("parakeet.cpp", "tdt-0.6b-v3-q8_0.gguf", {"variant": "cpu"}),
+    "pcpp-v3-q4":       ("parakeet.cpp", "tdt-0.6b-v3-q4_k.gguf", {"variant": "cpu"}),
+    "pcpp-v3-vulkan":   ("parakeet.cpp", "tdt-0.6b-v3-q8_0.gguf", {"variant": "vulkan"}),
 }
-DEFAULT_MODELS = ["whisper-base", "whisper-small", "whisper-turbo", "parakeet-v3"]
+DEFAULT_MODELS = ["whisper-base", "parakeet-v3", "sherpa-v3", "pcpp-v3-q8", "pcpp-v3-q4", "pcpp-v3-vulkan"]
 
 
 # --- Recording -----------------------------------------------------------
@@ -117,6 +137,47 @@ def wer(ref, hyp):
     return d[len(h)] / max(len(r), 1), len(r)
 
 
+# --- Downloads -----------------------------------------------------------
+
+def fetch(url, dest):
+    """Download `url` to `dest` unless it is already there."""
+    if dest.exists():
+        return dest
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    print(f"Downloading {url} ...", file=sys.stderr, flush=True)
+    tmp = dest.with_name(dest.name + ".part")
+    urllib.request.urlretrieve(url, tmp)
+    tmp.rename(dest)
+    return dest
+
+
+def fetch_tarball(url, dest_dir):
+    """Download and unpack `url` into `dest_dir` unless already unpacked."""
+    if dest_dir.exists():
+        return dest_dir
+    archive = fetch(url, dest_dir.with_name(url.rsplit("/", 1)[1]))
+    with tarfile.open(archive) as tar:
+        tar.extractall(dest_dir.with_name(dest_dir.name + ".part"), filter="data")
+    dest_dir.with_name(dest_dir.name + ".part").rename(dest_dir)
+    archive.unlink()
+    return dest_dir
+
+
+def load_parakeet_cpp(variant):
+    """ctypes handle to the prebuilt libparakeet.so (variant: cpu or vulkan)."""
+    root = fetch_tarball(PCPP_LIB_URL.format(variant=variant),
+                         CACHE_DIR / "parakeet-cpp" / f"{PCPP_VERSION}-{variant}")
+    lib = ctypes.CDLL(str(next(root.rglob("libparakeet.so"))))
+    lib.parakeet_capi_load.restype = ctypes.c_void_p
+    lib.parakeet_capi_load.argtypes = [ctypes.c_char_p]
+    lib.parakeet_capi_load_error.restype = ctypes.c_char_p
+    lib.parakeet_capi_transcribe_pcm.restype = ctypes.c_void_p
+    lib.parakeet_capi_transcribe_pcm.argtypes = [
+        ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int, ctypes.c_int, ctypes.c_int]
+    lib.parakeet_capi_free_string.argtypes = [ctypes.c_void_p]
+    return lib
+
+
 # --- Benchmark worker (one model per process) ----------------------------
 
 def rss_mb():
@@ -141,6 +202,37 @@ def worker(args):
         def transcribe(audio, lang):
             segments, _ = model.transcribe(audio, beam_size=5, language=lang, vad_filter=True)
             return " ".join(s.text for s in segments).strip()
+    elif backend == "sherpa-onnx":
+        import sherpa_onnx
+        d = fetch_tarball(SHERPA_MODEL_URL, CACHE_DIR / "sherpa-onnx" / model_id) / model_id
+        # sherpa-onnx defaults to a single thread; give it one per physical core
+        # so "library default" compares like with like.
+        model = sherpa_onnx.OfflineRecognizer.from_transducer(
+            encoder=str(d / "encoder.int8.onnx"), decoder=str(d / "decoder.int8.onnx"),
+            joiner=str(d / "joiner.int8.onnx"), tokens=str(d / "tokens.txt"),
+            num_threads=args.threads or max(os.cpu_count() // 2, 1), model_type="nemo_transducer")
+
+        def transcribe(audio, lang):
+            stream = model.create_stream()
+            stream.accept_waveform(SAMPLERATE, audio)
+            model.decode_stream(stream)
+            return stream.result.text.strip()
+    elif backend == "parakeet.cpp":
+        lib = load_parakeet_cpp(opts["variant"])
+        gguf = fetch(PCPP_MODEL_URL.format(file=model_id), CACHE_DIR / "parakeet-cpp" / "models" / model_id)
+        ctx = lib.parakeet_capi_load(str(gguf).encode())
+        if not ctx:
+            sys.exit(f"parakeet.cpp load failed: {lib.parakeet_capi_load_error().decode()}")
+        if args.threads:
+            # Not in the C API; the C++ setter is exported and applies to later calls.
+            lib._ZN2pk15set_num_threadsEi(args.threads)
+
+        def transcribe(audio, lang):
+            audio = np.ascontiguousarray(audio, dtype=np.float32)
+            out = lib.parakeet_capi_transcribe_pcm(ctx, audio.ctypes.data, len(audio), SAMPLERATE, 0)
+            text = ctypes.string_at(out).decode()
+            lib.parakeet_capi_free_string(out)
+            return text.strip()
     else:
         import onnx_asr
         import onnxruntime as ort
@@ -224,7 +316,7 @@ def main():
     p.add_argument("--dir", default=str(DEFAULT_DIR), help="clip directory")
     p.add_argument("--device", help="input device index or name (record)")
     p.add_argument("--models", nargs="+", default=DEFAULT_MODELS, choices=list(MODELS))
-    p.add_argument("--threads", type=int, default=0, help="cap CPU threads (0 = library default)")
+    p.add_argument("--threads", type=int, default=0, help="cap CPU threads (0 = library default, one per physical core for sherpa-onnx)")
     p.add_argument("--worker", help=argparse.SUPPRESS)
     args = p.parse_args()
 
