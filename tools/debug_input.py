@@ -2,7 +2,6 @@ import evdev
 from evdev import ecodes, InputDevice, list_devices
 import os
 import subprocess
-import time
 
 def list_all_input_devices():
     print("\n--- Input Devices ---")
@@ -26,9 +25,9 @@ def test_injection_environment():
     print(f"Expected Socket: {socket_path}")
     
     if os.path.exists(socket_path):
-        print(f"Socket exists: Yes")
+        print("Socket exists: Yes")
     else:
-        print(f"Socket exists: NO (ydotoold might not be running or in wrong place)")
+        print("Socket exists: NO (ydotoold might not be running or in wrong place)")
 
     try:
         subprocess.run(["which", "ydotool"], check=True, capture_output=True)

@@ -8,7 +8,6 @@ for name in ["evdev"]:
 # Minimal attributes the module accesses at import time.
 _evdev = sys.modules["evdev"]
 _evdev.InputDevice = object
-_evdev.categorize = lambda e: e
 _evdev.list_devices = lambda: []
 _ecodes = types.SimpleNamespace(KEY_RIGHTALT=100, KEY_F23=193, EV_KEY=1, KEY_A=30)
 _evdev.ecodes = _ecodes

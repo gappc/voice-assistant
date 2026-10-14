@@ -14,8 +14,8 @@ import numpy as np
 import sounddevice as sd
 from PySide6.QtWidgets import QApplication, QSystemTrayIcon, QMenu
 from PySide6.QtGui import QIcon, QAction, QCursor, QPixmap, QPainter, QColor, QBrush, QActionGroup
-from PySide6.QtCore import QTimer, Qt, Signal, QObject, Slot
-from evdev import InputDevice, categorize, ecodes, list_devices
+from PySide6.QtCore import QTimer, Qt, Signal, QObject
+from evdev import InputDevice, ecodes, list_devices
 
 import tray_settings
 from speech_reader import SpeechReader, VOICE_CATALOG, DEFAULT_VOICE
@@ -821,7 +821,7 @@ class VoiceAssistant:
         # Load the TTS voice (downloads on first run)
         self.reader.load()
 
-        print(f"Assistant ready! Hold Right Alt to record (with beeps).")
+        print("Assistant ready! Hold Right Alt to record (with beeps).")
         
         for kb in keyboards:
             threading.Thread(target=self.listen_to_device, args=(kb,), daemon=True).start()

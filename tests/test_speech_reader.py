@@ -18,8 +18,6 @@ def test_default_voices_dir_falls_back_to_home(monkeypatch):
     )
 
 
-from types import SimpleNamespace
-
 import numpy as np
 
 
