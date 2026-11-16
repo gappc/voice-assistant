@@ -7,6 +7,10 @@ through the compositor instead. GNOME asks once ("Allow remote interaction?")
 and remembers the answer through a restore token, so later starts are silent.
 Injected keys reach only this user's own session.
 
+The session is opened for each paste and closed right after, so GNOME's
+"remote control" indicator shows only while keys are actually being sent: if
+it appears while you are not dictating, something else is using the portal.
+
 Keycodes are Linux evdev codes (29 = left Ctrl, 42 = left Shift, 47 = V); the
 compositor maps them through the current layout, like a real keyboard.
 """
@@ -55,8 +59,8 @@ def keysym_for(char):
 
 
 class PortalKeyboard:
-    """One RemoteDesktop session, opened on first use and kept for the life
-    of the process. Thread-safe: every call holds the lock."""
+    """Opens a RemoteDesktop session per action and closes it afterwards.
+    Thread-safe: every call holds the lock."""
 
     def __init__(self, token_path: Path):
         self._token_path = Path(token_path)
@@ -67,9 +71,13 @@ class PortalKeyboard:
     # --- public API ---
 
     def connect(self):
-        """Open the session now (shows GNOME's prompt the first time)."""
+        """Open and close a session now, so GNOME's one-time prompt appears
+        at startup rather than at the first paste."""
         with self._lock:
-            self._ensure_session()
+            try:
+                self._ensure_session()
+            finally:
+                self._drop()
 
     def press_combo(self, keycodes):
         """Press `keycodes` in order, then release them in reverse."""
@@ -94,15 +102,18 @@ class PortalKeyboard:
 
     def _send(self, action):
         with self._lock:
-            self._ensure_session()
             try:
-                action()
-            except (DBusErrorResponse, OSError):
-                # The user stopped sharing in GNOME, or the portal restarted:
-                # open a fresh session (silently, via the token) and retry once.
-                self._drop()
                 self._ensure_session()
-                action()
+                try:
+                    action()
+                except (DBusErrorResponse, OSError):
+                    # The portal restarted or dropped the session under us:
+                    # open a fresh one (silently, via the token), retry once.
+                    self._drop()
+                    self._ensure_session()
+                    action()
+            finally:
+                self._drop()
 
     def _keycode(self, keycode, state):
         self._call("NotifyKeyboardKeycode", "oa{sv}iu", (self._session, {}, keycode, state))
@@ -121,7 +132,17 @@ class PortalKeyboard:
         return reply.body
 
     def _drop(self):
+        """Close the session (ends GNOME's indicator) and the connection."""
         if self._conn is not None:
+            if self._session is not None:
+                try:
+                    self._conn.send_and_get_reply(new_method_call(
+                        DBusAddress(self._session, bus_name=PORTAL.bus_name,
+                                    interface="org.freedesktop.portal.Session"),
+                        "Close",
+                    ), timeout=2)
+                except Exception:
+                    pass  # closing the connection ends the session anyway
             try:
                 self._conn.close()
             except OSError:
