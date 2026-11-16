@@ -7,14 +7,17 @@ requires-python = ">=3.10"
 dependencies = [
     "sounddevice",
     "numpy",
-    "evdev",
     "PySide6-Essentials",
     "kokoro-onnx",
     "onnxruntime",
+    "jeepney>=0.9.0",
 ]
 
 [dependency-groups]
-dev = ["pytest"]
+dev = [
+    "evdev>=1.9.3",
+    "pytest",
+]
 
 [project.scripts]
 voice-assistant = "voice_assistant:main"

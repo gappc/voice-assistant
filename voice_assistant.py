@@ -7,6 +7,7 @@ import queue
 import signal
 import argparse
 import re
+import socket
 from pathlib import Path
 from typing import NamedTuple
 
@@ -15,19 +16,23 @@ import sounddevice as sd
 from PySide6.QtWidgets import QApplication, QSystemTrayIcon, QMenu
 from PySide6.QtGui import QIcon, QAction, QCursor, QPixmap, QPainter, QColor, QBrush, QActionGroup
 from PySide6.QtCore import QTimer, Qt, Signal, QObject
-from evdev import InputDevice, ecodes, list_devices
 
 import tray_settings
 from speech_reader import SpeechReader, VOICE_CATALOG, DEFAULT_VOICE
 from speech_recognizer import SpeechRecognizer
 from text_source import get_text_to_read
+from portal_keyboard import PortalKeyboard, PortalError
 
 # --- Configuration ---
 CHANNELS = 1
 SAMPLERATE = 16000
-TRIGGER_KEY_CODE = ecodes.KEY_RIGHTALT  # Scan code 100
-KEYBOARD_LAYOUT = "de" # Set to "de" for German, "us" for US
-READ_KEY_CODE = ecodes.KEY_F23  # Copilot key emits Meta+Shift+F23; F23 is the tell
+# Hotkeys come from voice-hotkeyd (hotkey_helper/), a system service that reads
+# the keyboards and passes on only Right Alt ("talk") and F23 ("read", the
+# Copilot key). The app itself never sees a keystroke.
+HOTKEY_SOCKET = os.environ.get("VOICE_HOTKEY_SOCKET", "/run/voice-hotkey.sock")
+HOTKEY_RETRY_SECONDS = 2.0
+# Linux keycodes for the paste shortcut, sent through the RemoteDesktop portal.
+KEY_LEFTCTRL, KEY_LEFTSHIFT, KEY_V = 29, 42, 47
 READ_SPEED = 1.0  # playback speed multiplier (1.0 = normal; >1 faster, <1 slower)
 SPEED_PRESETS = {"Slow": 0.8, "Normal": 1.0, "Fast": 1.25}
 # Audio conditioning before transcription. The laptop's built-in mic delivers
@@ -191,6 +196,7 @@ class VoiceAssistant:
         # Ctrl+Shift+V works in terminals and most editors; flip off for apps
         # that reserve it (e.g. LibreOffice "Paste Special").
         self.paste_with_shift = startup.paste_with_shift
+        self.keyboard = PortalKeyboard(self._settings_path.parent / "portal_restore_token")
 
         # Setup signal handlers
         signal.signal(signal.SIGINT, self.handle_signal)
@@ -314,35 +320,44 @@ class VoiceAssistant:
     def inject_text(self, text):
         if not text:
             return
-        
+
         print(f"Injecting: {text}")
         try:
-            env = os.environ.copy()
-            uid = os.getuid()
-            if "YDOTOOL_SOCKET" not in env:
-                env["YDOTOOL_SOCKET"] = f"/run/user/{uid}/.ydotool_socket"
-            
-            # 1. Use wl-copy to put text in clipboard
             print("  - Copying to clipboard...")
             subprocess.run(["wl-copy", text], check=True)
-            
-            # Small delay to ensure the OS has registered the clipboard change
-            time.sleep(0.1)
-            
-            # 2. Use ydotool to trigger paste. Codes: 29=LCTRL, 42=LSHIFT, 47=V.
-            if self.paste_with_shift:
-                print("  - Triggering Ctrl+Shift+V...")
-                paste_keys = ["29:1", "42:1", "47:1", "47:0", "42:0", "29:0"]
-            else:
-                print("  - Triggering Ctrl+V...")
-                paste_keys = ["29:1", "47:1", "47:0", "29:0"]
-            subprocess.run(["ydotool", "key", *paste_keys], check=True, env=env)
+        except (subprocess.CalledProcessError, OSError) as e:
+            print(f"Clipboard copy failed, typing instead: {e}")
+            self._press(lambda: self.keyboard.type_text(text))
+            return
+
+        # Small delay to ensure the OS has registered the clipboard change
+        time.sleep(0.1)
+        if self.paste_with_shift:
+            print("  - Triggering Ctrl+Shift+V...")
+            keys = [KEY_LEFTCTRL, KEY_LEFTSHIFT, KEY_V]
+        else:
+            print("  - Triggering Ctrl+V...")
+            keys = [KEY_LEFTCTRL, KEY_V]
+        if self._press(lambda: self.keyboard.press_combo(keys)):
             print("  - Done.")
-            
-        except subprocess.CalledProcessError as e:
-            # Fallback to typing if wl-copy or ydotool fails
-            print(f"Clipboard injection failed, falling back to typing: {e}")
-            subprocess.run(["ydotool", "type", "--key-delay", "1", text], check=True, env=env)
+
+    def _press(self, action):
+        """Runs a portal key action. On failure the user is told; the text is
+        still on the clipboard when the paste was what failed."""
+        try:
+            action()
+            return True
+        except PortalError as e:
+            print(f"Key injection refused: {e}", file=sys.stderr)
+            self._notify(
+                "Could not paste",
+                "Keyboard access was not granted. The text is on the "
+                "clipboard; paste it with Ctrl+V.",
+            )
+        except Exception as e:
+            print(f"Key injection failed: {e}", file=sys.stderr)
+            self._notify("Could not paste", f"{e}. The text may be on the clipboard.")
+        return False
 
     def get_input_devices(self):
         """Returns a list of available input devices."""
@@ -495,39 +510,76 @@ class VoiceAssistant:
         self._apply_input_device(device_id_or_name)
         self._save_settings()
 
-    def find_keyboards(self):
-        keyboards = []
-        for path in list_devices():
-            dev = InputDevice(path)
-            name = dev.name.lower()
-            # Ignore virtual/noise devices
-            if any(x in name for x in ["ydotool", "virtual", "video", "button"]):
-                continue
-            
-            if ecodes.EV_KEY in dev.capabilities():
-                if ecodes.KEY_A in dev.capabilities()[ecodes.EV_KEY]:
-                    print(f"Detected keyboard: {dev.name} ({dev.path})")
-                    keyboards.append(dev)
-        return keyboards
+    def handle_hotkey(self, line):
+        """Acts on one line from voice-hotkeyd: "<talk|read> <down|up> <dev>"."""
+        parts = line.split()
+        if len(parts) != 3:
+            return
+        key, state, dev = parts
+        if key == "talk":
+            if state == "down":
+                self.start_recording(dev)
+            elif state == "up":
+                self.stop_recording(dev)
+        elif key == "read" and state == "down":
+            self.on_read_key()
 
-    def listen_to_device(self, device):
-        print(f"Listening to {device.name}...")
+    def listen_to_hotkeys(self, sock):
+        """Dispatches hotkey lines from a connected helper socket until it
+        closes. Whatever it ends, a recording it started is released: the
+        key-up can no longer arrive."""
+        buf = b""
         try:
-            for event in device.read_loop():
-                if event.type == ecodes.EV_KEY:
-                    if event.code == TRIGGER_KEY_CODE:
-                        if event.value == 1: # Key down
-                            self.start_recording(device.path)
-                        elif event.value == 0: # Key up
-                            self.stop_recording(device.path)
-                    elif event.code == READ_KEY_CODE and event.value == 1:
-                        self.on_read_key()
-        except Exception as e:
-            print(f"Device error or disconnected: {device.name} - {e}")
+            while True:
+                data = sock.recv(4096)
+                if not data:
+                    break
+                buf += data
+                *lines, buf = buf.split(b"\n")
+                for line in lines:
+                    self.handle_hotkey(line.decode("ascii", "replace"))
+        except OSError as e:
+            print(f"Hotkey helper connection lost: {e}", file=sys.stderr)
         finally:
-            # If the keyboard died mid-press the key-up will never arrive, so
-            # release anything this device is still holding.
-            self.stop_recording(device.path)
+            sock.close()
+            with self.lock:
+                if self.is_recording:
+                    self._finish_recording()
+
+    def _hotkey_loop(self):
+        """Keeps a connection to voice-hotkeyd, reconnecting when it restarts."""
+        warned = False
+        while True:
+            sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            try:
+                sock.connect(HOTKEY_SOCKET)
+            except OSError as e:
+                sock.close()
+                if not warned:
+                    print(f"Hotkey helper unavailable at {HOTKEY_SOCKET}: {e}",
+                          file=sys.stderr)
+                    self._notify(
+                        "Hotkeys unavailable",
+                        f"Cannot reach the hotkey helper ({HOTKEY_SOCKET}). "
+                        "Is voice-hotkey.socket installed and enabled?",
+                    )
+                    warned = True
+                time.sleep(HOTKEY_RETRY_SECONDS)
+                continue
+            if warned:
+                print("Hotkey helper connected.")
+            warned = False
+            self.listen_to_hotkeys(sock)
+            time.sleep(HOTKEY_RETRY_SECONDS)
+
+    def _connect_keyboard(self):
+        """Opens the portal session at startup, so GNOME's one-time prompt
+        appears now rather than in the middle of the first dictation."""
+        try:
+            self.keyboard.connect()
+            print("Keyboard access granted (RemoteDesktop portal).")
+        except Exception as e:
+            print(f"Keyboard access not granted yet: {e}", file=sys.stderr)
 
     def on_read_key(self):
         """Copilot key tapped: toggle read-aloud of the selection/clipboard."""
@@ -581,18 +633,6 @@ class VoiceAssistant:
         """Tray-triggered output device change: apply it and persist the choice."""
         self._apply_output_device(device_id_or_name)
         self._save_settings()
-
-    def ensure_ydotoold(self):
-        """Ensures ydotoold is running and sets the socket environment variable."""
-        uid = os.getuid()
-        os.environ["YDOTOOL_SOCKET"] = f"/run/user/{uid}/.ydotool_socket"
-        try:
-            # Check if ydotoold is running
-            subprocess.run(["pgrep", "ydotoold"], check=True, capture_output=True)
-        except subprocess.CalledProcessError:
-            print("Starting ydotoold...")
-            subprocess.Popen(["ydotoold"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            time.sleep(1)
 
     def handle_signal(self, signum, frame):
         # Restore the default handlers: stop() no longer exits the process, so
@@ -809,11 +849,7 @@ class VoiceAssistant:
             )
 
     def run(self):
-        self.ensure_ydotoold()
-        keyboards = self.find_keyboards()
-        if not keyboards:
-            print("No keyboard devices found! Check permissions or /dev/input permissions.")
-            return
+        threading.Thread(target=self._connect_keyboard, daemon=True).start()
 
         # Resolve the input device (does not open it: see _open_input_stream)
         self._apply_input_device(self.current_device)
@@ -823,14 +859,14 @@ class VoiceAssistant:
 
         print("Assistant ready! Hold Right Alt to record (with beeps).")
         
-        for kb in keyboards:
-            threading.Thread(target=self.listen_to_device, args=(kb,), daemon=True).start()
+        threading.Thread(target=self._hotkey_loop, daemon=True).start()
         
         # Start PySide6 Tray (blocks until quit)
         exit_code = self.run_tray()
         
         # Cleanup
         self._close_input_stream()
+        self.keyboard.close()
         sys.exit(exit_code)
 
     def test_read(self, text, voice=None):
@@ -845,7 +881,7 @@ class VoiceAssistant:
 
     def test_injection(self):
         """Tests the injection logic with a dummy message."""
-        self.ensure_ydotoold()
+        self.keyboard.connect()
         print("Test injection starting in 3 seconds... Switch to your editor!")
         time.sleep(3)
         test_text = "This is a test transcription from the local voice assistant."

@@ -1,17 +1,6 @@
 import sys
 import types
 
-# Stub heavy/hardware modules so importing voice_assistant is cheap and safe.
-for name in ["evdev"]:
-    sys.modules.setdefault(name, types.ModuleType(name))
-
-# Minimal attributes the module accesses at import time.
-_evdev = sys.modules["evdev"]
-_evdev.InputDevice = object
-_evdev.list_devices = lambda: []
-_ecodes = types.SimpleNamespace(KEY_RIGHTALT=100, KEY_F23=193, EV_KEY=1, KEY_A=30)
-_evdev.ecodes = _ecodes
-
 import voice_assistant
 
 
@@ -693,39 +682,33 @@ def test_reload_devices_skipped_while_reading_aloud(monkeypatch):
 # --- A recording must never outlive the key-up that should end it ---
 
 
-class _FakeInputDevice:
-    """evdev device whose read_loop yields events and then dies, the way a
-    keyboard does when it is unplugged mid-keystroke."""
+def _helper_socket(lines, then_error=False):
+    """A connected socket pair standing in for voice-hotkeyd: the app end gets
+    `lines`, then the helper end closes (or the read fails)."""
+    app_end, helper_end = voice_assistant.socket.socketpair()
+    helper_end.sendall("".join(lines).encode())
+    helper_end.close()
+    if then_error:
+        real_recv = app_end.recv
+        state = {"sent": False}
 
-    def __init__(self, path, name, events, error=None):
-        self.path = path
-        self.name = name
-        self._events = events
-        self._error = error
-
-    def read_loop(self):
-        yield from self._events
-        if self._error:
-            raise self._error
+        def recv(n):
+            if state["sent"]:
+                raise OSError("connection reset")
+            state["sent"] = True
+            return real_recv(n)
+        app_end = types.SimpleNamespace(recv=recv, close=app_end.close)
+    return app_end
 
 
-def _key_event(code, value):
-    return types.SimpleNamespace(type=_ecodes.EV_KEY, code=code, value=value)
-
-
-def test_recording_released_when_owning_keyboard_disconnects(monkeypatch):
-    """Key down, then the keyboard vanishes: the key-up never arrives, so
+def test_recording_released_when_hotkey_helper_goes_away(monkeypatch):
+    """Key down, then the helper restarts: the key-up never arrives, so
     without a release the stream stays open and audio_data grows forever."""
     va = _bare_assistant(monkeypatch, [{"index": 0, "name": "Mic"}])
     va.current_device = 0
     va.transcription_queue = voice_assistant.queue.Queue()
-    dev = _FakeInputDevice(
-        "/dev/input/eventA", "Vanishing Keyboard",
-        [_key_event(voice_assistant.TRIGGER_KEY_CODE, 1)],
-        error=OSError("device disconnected"),
-    )
 
-    va.listen_to_device(dev)
+    va.listen_to_hotkeys(_helper_socket(["talk down event3\n"], then_error=True))
 
     assert va.is_recording is False
     assert va.stream is None
@@ -737,15 +720,121 @@ def test_recording_survives_a_clean_key_up(monkeypatch):
     va = _bare_assistant(monkeypatch, [{"index": 0, "name": "Mic"}])
     va.current_device = 0
     va.transcription_queue = voice_assistant.queue.Queue()
-    dev = _FakeInputDevice("/dev/input/eventA", "Normal Keyboard", [
-        _key_event(voice_assistant.TRIGGER_KEY_CODE, 1),
-        _key_event(voice_assistant.TRIGGER_KEY_CODE, 0),
-    ])
 
-    va.listen_to_device(dev)
+    va.listen_to_hotkeys(_helper_socket(["talk down event3\n", "talk up event3\n"]))
 
     assert va.is_recording is False
     assert _FakeStream.instances[0].closed
+    assert va.transcription_queue.qsize() <= 1
+
+
+def test_key_up_from_another_keyboard_does_not_stop_recording(monkeypatch):
+    va = _bare_assistant(monkeypatch, [{"index": 0, "name": "Mic"}])
+    va.current_device = 0
+    va.transcription_queue = voice_assistant.queue.Queue()
+
+    va.handle_hotkey("talk down event3")
+    va.handle_hotkey("talk up event5")
+
+    assert va.is_recording is True
+
+
+def test_hotkey_lines_split_across_reads_are_reassembled(monkeypatch):
+    va = voice_assistant.VoiceAssistant.__new__(voice_assistant.VoiceAssistant)
+    va.lock = voice_assistant.threading.Lock()
+    va.is_recording = False
+    seen = []
+    monkeypatch.setattr(va, "handle_hotkey", seen.append)
+    chunks = [b"read do", b"wn event3\nread up event3\ntalk", b" down event3\n", b""]
+    sock = types.SimpleNamespace(recv=lambda n: chunks.pop(0), close=lambda: None)
+
+    va.listen_to_hotkeys(sock)
+
+    assert seen == ["read down event3", "read up event3", "talk down event3"]
+
+
+def test_read_key_press_toggles_reading_and_release_is_ignored(monkeypatch):
+    va = voice_assistant.VoiceAssistant.__new__(voice_assistant.VoiceAssistant)
+    calls = []
+    monkeypatch.setattr(va, "on_read_key", lambda: calls.append("read"))
+
+    va.handle_hotkey("read down event3")
+    va.handle_hotkey("read up event3")
+    va.handle_hotkey("garbage")
+
+    assert calls == ["read"]
+
+
+class _FakeKeyboard:
+    def __init__(self, error=None):
+        self.combos = []
+        self.typed = []
+        self.error = error
+
+    def press_combo(self, keys):
+        if self.error:
+            raise self.error
+        self.combos.append(keys)
+
+    def type_text(self, text):
+        self.typed.append(text)
+
+
+def _injecting_assistant(monkeypatch, keyboard, wl_copy_fails=False):
+    va = voice_assistant.VoiceAssistant.__new__(voice_assistant.VoiceAssistant)
+    va.keyboard = keyboard
+    va.paste_with_shift = True
+    va.notifications = []
+    monkeypatch.setattr(va, "_notify", lambda t, m: va.notifications.append((t, m)))
+    monkeypatch.setattr(voice_assistant.time, "sleep", lambda s: None)
+    copied = []
+
+    def fake_run(args, check):
+        if wl_copy_fails:
+            raise voice_assistant.subprocess.CalledProcessError(1, args)
+        copied.append(args)
+    monkeypatch.setattr(voice_assistant.subprocess, "run", fake_run)
+    return va, copied
+
+
+def test_inject_text_copies_then_pastes_with_ctrl_shift_v(monkeypatch):
+    kb = _FakeKeyboard()
+    va, copied = _injecting_assistant(monkeypatch, kb)
+
+    va.inject_text("Grüße")
+
+    assert copied == [["wl-copy", "Grüße"]]
+    assert kb.combos == [[29, 42, 47]]
+
+
+def test_inject_text_plain_ctrl_v_when_shift_disabled(monkeypatch):
+    kb = _FakeKeyboard()
+    va, _ = _injecting_assistant(monkeypatch, kb)
+    va.paste_with_shift = False
+
+    va.inject_text("hello")
+
+    assert kb.combos == [[29, 47]]
+
+
+def test_inject_text_types_when_clipboard_fails(monkeypatch):
+    kb = _FakeKeyboard()
+    va, _ = _injecting_assistant(monkeypatch, kb, wl_copy_fails=True)
+
+    va.inject_text("hello")
+
+    assert kb.typed == ["hello"]
+    assert kb.combos == []
+
+
+def test_inject_text_tells_user_when_keyboard_access_refused(monkeypatch):
+    kb = _FakeKeyboard(error=voice_assistant.PortalError("no", cancelled=True))
+    va, copied = _injecting_assistant(monkeypatch, kb)
+
+    va.inject_text("hello")
+
+    assert copied, "the text must still reach the clipboard"
+    assert va.notifications and "clipboard" in va.notifications[0][1]
 
 
 def test_recording_timeout_releases_a_stuck_recording(monkeypatch):

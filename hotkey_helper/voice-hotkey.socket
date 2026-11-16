@@ -1,0 +1,13 @@
+[Unit]
+Description=Hotkey socket for the voice assistant
+
+[Socket]
+ListenStream=/run/voice-hotkey.sock
+# Only the desktop user may connect. The helper enables hotkeys for whoever
+# owns this file, so this is the one place that names the user.
+SocketUser=chris
+SocketGroup=chris
+SocketMode=0600
+
+[Install]
+WantedBy=sockets.target

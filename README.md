@@ -7,8 +7,8 @@ A fast, privacy-respecting, and reliable local voice-to-text assistant designed 
 - **Push-to-Talk**: Hold **Right Alt** anywhere in the OS to record, release to transcribe and type. 
 - **Multilingual Dictation**: English, German and 23 other European languages, detected per recording; there is no language to pick.
 - **Read Aloud (Text-to-Speech)**: Tap the **Copilot key** (right of AltGr) to have your highlighted selection (or clipboard) read aloud with a natural local voice via [Kokoro-82M](https://huggingface.co/hexgrad/Kokoro-82M). Tap again to stop. Fully offline after a one-time model download.
-- **Wayland-Native Global Hotkeys**: Uses `evdev` to capture key events directly from the hardware, bypassing Wayland security limitations that block traditional listeners like `pynput`.
-- **Layout-Independent Text Injection**: Uses `wl-copy` and `ydotool` (Ctrl+Shift+V simulation by default) to paste the transcribed text. This ensures 100% accuracy for special characters and prevents mixed-up letters on non-US layouts (like Z/Y on German QWERTZ). The default Ctrl+Shift+V works in terminals as well as editors and IDEs; a tray menu toggle is provided to switch to plain Ctrl+V for apps that reserve Ctrl+Shift+V (e.g. LibreOffice "Paste Special").
+- **Wayland-Native Global Hotkeys without the `input` group**: A tiny root-installed system service (`hotkey_helper/voice-hotkeyd.py`) reads the keyboards and passes on only Right Alt and F23 over a Unix socket. Your user, and so every program you run, never gets to read keystrokes.
+- **Layout-Independent Text Injection**: Uses `wl-copy` and the RemoteDesktop portal (Ctrl+Shift+V by default) to paste the transcribed text. This ensures 100% accuracy for special characters and prevents mixed-up letters on non-US layouts (like Z/Y on German QWERTZ). The default Ctrl+Shift+V works in terminals as well as editors and IDEs; a tray menu toggle is provided to switch to plain Ctrl+V for apps that reserve Ctrl+Shift+V (e.g. LibreOffice "Paste Special").
 - **Audio Feedback**: Plays subtle beeps indicating when recording starts and stops—no need to look at a terminal or status bar.
 - **GPU Transcription**: Runs on the GPU through Vulkan (including AMD/Intel integrated graphics) via [parakeet.cpp](https://github.com/mudler/parakeet.cpp), taking ~0.1 s per phrase with almost no CPU use, and falls back to the CPU when no Vulkan device is found. Silence and key clicks produce no text.
 - **Background Service & Desktop Integration**: Includes a simple `.desktop` file for easy launching from your app menu or startup applications.
@@ -16,9 +16,41 @@ A fast, privacy-respecting, and reliable local voice-to-text assistant designed 
 ## Requirements
 
 Ensure the following system dependencies are installed:
-- `ydotool` (for keyboard simulation)
 - `wl-clipboard` (for Wayland clipboard access)
-- Your user must be in the `input` group for `evdev` access (`sudo usermod -aG input $USER`).
+- GNOME or KDE: the paste goes through the xdg-desktop-portal RemoteDesktop
+  interface, which wlroots desktops (Sway, Hyprland) do not offer.
+- The hotkey helper, installed once as root (below). Your user does **not**
+  need to be in the `input` group, and should not be.
+
+### Hotkey helper
+
+Reading keyboards needs the `input` group, and anything in that group can read
+every keystroke on the machine, in every session: passwords and PINs typed
+elsewhere included. So only a small system service holds it. It runs as a
+throwaway user with no network and no writable files, passes on exactly Right
+Alt and F23 (press and release, nothing else, not even timing), and only while
+your session is the active one. It uses the Python standard library only, so it
+loads no code your user can change.
+
+```bash
+sudo install -D -m644 -o root -g root hotkey_helper/voice-hotkeyd.py /usr/local/lib/voice-hotkey/voice-hotkeyd.py
+sudo install -m644 hotkey_helper/voice-hotkey.socket hotkey_helper/voice-hotkey.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now voice-hotkey.socket
+```
+
+`voice-hotkey.socket` names the user who may connect (`SocketUser=chris`):
+change it for another account. Check it works: run
+`python3 -c "import socket; s=socket.socket(socket.AF_UNIX); s.connect('/run/voice-hotkey.sock'); print(s.recv(64))"`
+and press Right Alt; it prints `b'talk down event…'`.
+
+### Keyboard access for pasting
+
+On first start GNOME asks once whether the Voice Assistant may control the
+keyboard ("remote interaction"). Allow it; the answer is remembered in
+`~/.config/voice-assistant/portal_restore_token`. Delete that file to be asked
+again. Unlike `ydotool`, this needs no access to `/dev/uinput`, and keys reach
+only your own session.
 
 ## Installation
 
@@ -32,7 +64,7 @@ This project uses `uv` for seamless, lightning-fast Python dependency management
    ```bash
    uv run voice_assistant.py
    ```
-   `uv` will automatically create an isolated virtual environment and fetch all python dependencies (`sounddevice`, `evdev`, etc.).
+   `uv` will automatically create an isolated virtual environment and fetch all python dependencies (`sounddevice`, `jeepney`, etc.).
 
 ## Usage
 
@@ -99,15 +131,13 @@ You can then search for "Voice Assistant" in your application menu, or add it to
 
 ## Troubleshooting
 
-- **No Key Detection**: If the script boots up but holding Right Alt does nothing, make sure your user is part of the `input` group. (You may need to log out and log back in after joining).
-- **Read-aloud does nothing**: The Copilot key emits `Meta+Shift+F23`; the assistant listens for `F23`. Confirm your key sends it with `uv run key_detector.py` (tap the Copilot key, look for `KEY_F23`). If nothing is selected and the clipboard is empty, you'll hear a short low beep instead.
+- **No Key Detection**: If holding Right Alt does nothing, the app shows a "Hotkeys unavailable" notice when it cannot reach the helper. Check `systemctl status voice-hotkey.socket voice-hotkey.service` and `journalctl -u voice-hotkey`. Hotkeys are off while another user's session is in front.
+- **Read-aloud does nothing**: The Copilot key emits `Meta+Shift+F23`; the assistant listens for `F23`. Confirm your key sends it with `sudo .venv/bin/python key_detector.py` (tap the Copilot key, look for `KEY_F23`). If nothing is selected and the clipboard is empty, you'll hear a short low beep instead.
 - **Recordings produce no text**: Each recording logs `Audio: <length>, peak <level>, gain <boost>`. Recordings are centred (DC offset removed) and quiet ones are boosted up to 10×, which rescues built-in laptop mics that deliver very quiet audio on a DC offset. A peak well below ~0.01 while you were speaking means the mic is barely picking you up: pick another device in the tray, or raise the capture/boost level in `alsamixer` (F4).
 - **Text isn't pasting**:
-    - The assistant uses `wl-copy` and `ydotool` to simulate a Ctrl+Shift+V paste by default (works in terminals and most editors). Ensure both are installed. If your target app does not accept Ctrl+Shift+V (e.g. LibreOffice), toggle off "Use Ctrl+Shift+V (terminal-compatible)" in the tray menu to fall back to plain Ctrl+V.
+    - The assistant uses `wl-copy` and the RemoteDesktop portal to press Ctrl+Shift+V by default (works in terminals and most editors). If you declined GNOME's keyboard prompt, the text is left on the clipboard and a notice says so: delete `~/.config/voice-assistant/portal_restore_token` and restart to be asked again. If your target app does not accept Ctrl+Shift+V (e.g. LibreOffice), toggle off "Use Ctrl+Shift+V (terminal-compatible)" in the tray menu to fall back to plain Ctrl+V.
     - **Test Injection**: Run `uv run voice_assistant.py --test-injection` to verify if the script can type into a focused window without recording.
-    - **Environment Check**: Run `uv run tools/debug_input.py` to check for `ydotool` socket issues and list your input devices.
-    - **Permissions**: Ensure your user is in the `input` group and has access to `/dev/uinput`.
-- **Wrong Key Detected**: If your keyboard isn't being picked up (e.g., you suspected `/dev/input/event16`), the script automatically finds all keyboards. You can verify which one is being used in the terminal output at startup.
+- **Wrong Key Detected**: The helper picks up every keyboard, including ones plugged in later (within ~2 s). `journalctl -u voice-hotkey` lists each one it listens to.
 - **Microphone issues**: Check your default input device in your GNOME/desktop sound settings.
 
 ---

@@ -1,0 +1,44 @@
+[Unit]
+Description=Hotkey helper for the voice assistant (passes on Right Alt and F23 only)
+Requires=voice-hotkey.socket
+After=voice-hotkey.socket
+
+[Service]
+ExecStart=/usr/bin/python3 -I /usr/local/lib/voice-hotkey/voice-hotkeyd.py
+Restart=on-failure
+RestartSec=2
+
+# Its own throwaway user, allowed to read keyboards and nothing else.
+DynamicUser=yes
+SupplementaryGroups=input
+DevicePolicy=closed
+DeviceAllow=char-input r
+
+# No network, no home, no writes anywhere.
+PrivateNetwork=yes
+IPAddressDeny=any
+RestrictAddressFamilies=AF_UNIX
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+SystemCallFilter=@system-service
+SystemCallArchitectures=native
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+ProcSubset=pid
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target
