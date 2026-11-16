@@ -52,6 +52,14 @@ keyboard ("remote interaction"). Allow it; the answer is remembered in
 again. Unlike `ydotool`, this needs no access to `/dev/uinput`, and keys reach
 only your own session.
 
+The keyboard session is opened only for each paste, so GNOME's remote-control
+indicator flashes briefly while text is pasted. If it shows up while you are
+not dictating, some other program is using the portal.
+
+Changes to `hotkey_helper/` take effect only after installing them again as
+root. Why it is built this way, and what risk remains:
+[docs/2026-11-16-hotkeys-without-input-group.md](docs/2026-11-16-hotkeys-without-input-group.md).
+
 ## Installation
 
 This project uses `uv` for seamless, lightning-fast Python dependency management.
