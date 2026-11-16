@@ -27,7 +27,11 @@ press-to-start, press-to-stop on some other key. Hold-to-talk was worth a small
 service. `voice-hotkeyd`:
 
 - passes on only Right Alt and F23, press and release, as
-  `talk|read down|up eventN`. No other key, no timestamps, no counters, so the
+  `talk|read down|up eventN`, plus a lone tap of Right Ctrl as `read` for
+  keyboards without a Copilot key (on Copilot laptops that key replaced Right
+  Ctrl). A tap counts only with no other key pressed in between and a release
+  within 0.5 s, so Right Ctrl+C does nothing; Ctrl+click is not caught, since
+  the helper does not read mice. No other key, no timestamps, no counters, so the
   timing of other keys cannot be reconstructed;
 - passes on a press only while the socket owner's session is active on seat0
   (`ACTIVE_UID` in `/run/systemd/seats/seat0`), and fails closed if that file

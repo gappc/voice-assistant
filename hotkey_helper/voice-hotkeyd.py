@@ -4,9 +4,12 @@
 Reads the keyboards and passes on exactly four events over a Unix socket:
 
     talk down <dev>    talk up <dev>     (Right Alt, hold to dictate)
-    read down <dev>    read up <dev>     (F23, the Copilot key)
+    read down <dev>    read up <dev>     (F23 = Copilot key, or a Right Ctrl tap)
 
 <dev> is the kernel event node ("event3"), so the app can tell keyboards apart.
+A Right Ctrl tap counts only when no other key was pressed while it was down
+and it was released within TAP_SECONDS, so Ctrl+C typed with the right hand
+does nothing. It is reported as "read down" + "read up" at the release.
 Every other key is read and dropped: nothing about it, not even its timing,
 leaves this process. That lets the desktop user drop out of the `input` group,
 which otherwise lets any program they run read every keystroke on the machine.
@@ -36,12 +39,17 @@ import sys
 import time
 
 KEY_A = 30
+KEY_RIGHTCTRL = 97
 KEY_RIGHTALT = 100
 KEY_F23 = 193
 EV_KEY = 1
 
 # Linux keycode -> name on the wire. Nothing outside this map is ever sent.
 FORWARDED_KEYS = {KEY_RIGHTALT: "talk", KEY_F23: "read"}
+# Keyboards without a Copilot key (it replaced Right Ctrl on newer laptops):
+# a lone tap of Right Ctrl reads aloud too.
+TAP_KEY = KEY_RIGHTCTRL
+TAP_SECONDS = 0.5
 
 # struct input_event on 64-bit: struct timeval (two longs), u16 type, u16 code, s32 value.
 EVENT_FORMAT = "llHHi"
@@ -100,13 +108,20 @@ def active_uid(seat_file=SEAT_FILE):
 class Forwarder:
     """Decides which key events become messages. Pure logic, no I/O."""
 
-    def __init__(self, allowed_uid, active_uid_fn=active_uid):
+    def __init__(self, allowed_uid, active_uid_fn=active_uid, clock=time.monotonic):
         self.allowed_uid = allowed_uid
         self._active_uid = active_uid_fn
+        self._clock = clock
         self._held = set()  # (dev, keyname) whose down was passed on
+        self._tap_started = {}  # dev -> when TAP_KEY went down, while still a clean tap
 
     def on_event(self, dev, code, value):
-        """Message line for a key event, or None to drop it."""
+        """Message line(s) for a key event, or None to drop it."""
+        if code == TAP_KEY:
+            return self._on_tap_key(dev, value)
+        if value == 1:
+            # Any other key while Right Ctrl is down makes it a shortcut, not a tap.
+            self._tap_started.clear()
         name = FORWARDED_KEYS.get(code)
         if name is None:
             return None
@@ -120,6 +135,19 @@ class Forwarder:
             return f"{name} up {dev}\n"
         return None  # autorepeat (value 2), or an up we never announced
 
+    def _on_tap_key(self, dev, value):
+        if value == 1:
+            self._tap_started[dev] = self._clock()
+            return None
+        if value != 0:
+            return None  # autorepeat: still held, decided at release
+        started = self._tap_started.pop(dev, None)
+        if started is None or self._clock() - started > TAP_SECONDS:
+            return None
+        if self._active_uid() != self.allowed_uid:
+            return None
+        return f"read down {dev}\nread up {dev}\n"
+
     def on_device_lost(self, dev):
         """A keyboard unplugged mid-hold never sends its key-up: send it now."""
         lines = []
@@ -127,6 +155,7 @@ class Forwarder:
             if held_dev == dev:
                 lines.append(f"{name} up {dev}\n")
         self._held = {h for h in self._held if h[0] != dev}
+        self._tap_started.pop(dev, None)
         return lines
 
 

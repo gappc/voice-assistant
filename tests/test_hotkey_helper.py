@@ -11,8 +11,8 @@ OTHER = 1001
 
 
 def _forwarder(active=ME):
-    state = {"uid": active}
-    fw = hk.Forwarder(ME, active_uid_fn=lambda: state["uid"])
+    state = {"uid": active, "now": 100.0}
+    fw = hk.Forwarder(ME, active_uid_fn=lambda: state["uid"], clock=lambda: state["now"])
     return fw, state
 
 
@@ -31,7 +31,7 @@ def test_read_key_is_forwarded():
 def test_every_other_key_is_dropped():
     fw, _ = _forwarder()
     for code in range(0, 0x300):
-        if code in hk.FORWARDED_KEYS:
+        if code in hk.FORWARDED_KEYS or code == hk.TAP_KEY:
             continue
         for value in (0, 1, 2):
             assert fw.on_event("event3", code, value) is None
@@ -83,3 +83,42 @@ def test_active_uid_is_none_when_missing_or_garbled(tmp_path):
     assert hk.active_uid(str(seat)) is None
     seat.write_text("IS_SEAT0=1\n")
     assert hk.active_uid(str(seat)) is None
+
+
+def _tap(fw, state, dev="event17", held=0.1):
+    first = fw.on_event(dev, hk.KEY_RIGHTCTRL, 1)
+    state["now"] += held
+    return first, fw.on_event(dev, hk.KEY_RIGHTCTRL, 0)
+
+
+def test_right_ctrl_tap_reads_aloud():
+    fw, state = _forwarder()
+    assert _tap(fw, state) == (None, "read down event17\nread up event17\n")
+
+
+def test_right_ctrl_as_part_of_a_shortcut_does_nothing():
+    fw, state = _forwarder()
+    fw.on_event("event17", hk.KEY_RIGHTCTRL, 1)
+    assert fw.on_event("event17", 46, 1) is None  # C
+    fw.on_event("event17", 46, 0)
+    assert fw.on_event("event17", hk.KEY_RIGHTCTRL, 0) is None
+
+
+def test_right_ctrl_held_long_is_not_a_tap():
+    fw, state = _forwarder()
+    fw.on_event("event17", hk.KEY_RIGHTCTRL, 1)
+    fw.on_event("event17", hk.KEY_RIGHTCTRL, 2)  # autorepeat while held
+    state["now"] += hk.TAP_SECONDS + 0.1
+    assert fw.on_event("event17", hk.KEY_RIGHTCTRL, 0) is None
+
+
+def test_right_ctrl_tap_in_another_session_stays_private():
+    fw, state = _forwarder(active=OTHER)
+    assert _tap(fw, state) == (None, None)
+
+
+def test_tap_cancelled_by_unplugging():
+    fw, state = _forwarder()
+    fw.on_event("event17", hk.KEY_RIGHTCTRL, 1)
+    fw.on_device_lost("event17")
+    assert fw.on_event("event17", hk.KEY_RIGHTCTRL, 0) is None

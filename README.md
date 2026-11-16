@@ -6,8 +6,8 @@ A fast, privacy-respecting, and reliable local voice-to-text assistant designed 
 
 - **Push-to-Talk**: Hold **Right Alt** anywhere in the OS to record, release to transcribe and type. 
 - **Multilingual Dictation**: English, German and 23 other European languages, detected per recording; there is no language to pick.
-- **Read Aloud (Text-to-Speech)**: Tap the **Copilot key** (right of AltGr) to have your highlighted selection (or clipboard) read aloud with a natural local voice via [Kokoro-82M](https://huggingface.co/hexgrad/Kokoro-82M). Tap again to stop. Fully offline after a one-time model download.
-- **Wayland-Native Global Hotkeys without the `input` group**: A tiny root-installed system service (`hotkey_helper/voice-hotkeyd.py`) reads the keyboards and passes on only Right Alt and F23 over a Unix socket. Your user, and so every program you run, never gets to read keystrokes.
+- **Read Aloud (Text-to-Speech)**: Tap the **Copilot key** (right of AltGr), or on keyboards without one tap **Right Ctrl** on its own, to have your highlighted selection (or clipboard) read aloud with a natural local voice via [Kokoro-82M](https://huggingface.co/hexgrad/Kokoro-82M). Tap again to stop. Fully offline after a one-time model download.
+- **Wayland-Native Global Hotkeys without the `input` group**: A tiny root-installed system service (`hotkey_helper/voice-hotkeyd.py`) reads the keyboards and passes on only Right Alt, F23 and lone Right Ctrl taps over a Unix socket. Your user, and so every program you run, never gets to read keystrokes.
 - **Layout-Independent Text Injection**: Uses `wl-copy` and the RemoteDesktop portal (Ctrl+Shift+V by default) to paste the transcribed text. This ensures 100% accuracy for special characters and prevents mixed-up letters on non-US layouts (like Z/Y on German QWERTZ). The default Ctrl+Shift+V works in terminals as well as editors and IDEs; a tray menu toggle is provided to switch to plain Ctrl+V for apps that reserve Ctrl+Shift+V (e.g. LibreOffice "Paste Special").
 - **Audio Feedback**: Plays subtle beeps indicating when recording starts and stops—no need to look at a terminal or status bar.
 - **GPU Transcription**: Runs on the GPU through Vulkan (including AMD/Intel integrated graphics) via [parakeet.cpp](https://github.com/mudler/parakeet.cpp), taking ~0.1 s per phrase with almost no CPU use, and falls back to the CPU when no Vulkan device is found. Silence and key clicks produce no text.
@@ -28,7 +28,7 @@ Reading keyboards needs the `input` group, and anything in that group can read
 every keystroke on the machine, in every session: passwords and PINs typed
 elsewhere included. So only a small system service holds it. It runs as a
 throwaway user with no network and no writable files, passes on exactly Right
-Alt and F23 (press and release, nothing else, not even timing), and only while
+Alt, F23 and lone Right Ctrl taps (nothing else, not even timing), and only while
 your session is the active one. It uses the Python standard library only, so it
 loads no code your user can change.
 
@@ -102,7 +102,7 @@ Why Parakeet replaced Whisper, with measurements: [docs/2026-10-14-speech-recogn
 ## Read Aloud
 
 1. Highlight any text (or copy it with Ctrl+C).
-2. Tap the **Copilot key** (located to the right of AltGr).
+2. Tap the **Copilot key** (located to the right of AltGr), or tap **Right Ctrl** on its own on a keyboard without one.
 3. The text is read aloud in the selected voice. Tap the key again to stop.
 
 The default voice is `en_US-bella`, downloaded automatically on first use and
@@ -140,7 +140,7 @@ You can then search for "Voice Assistant" in your application menu, or add it to
 ## Troubleshooting
 
 - **No Key Detection**: If holding Right Alt does nothing, the app shows a "Hotkeys unavailable" notice when it cannot reach the helper. Check `systemctl status voice-hotkey.socket voice-hotkey.service` and `journalctl -u voice-hotkey`. Hotkeys are off while another user's session is in front.
-- **Read-aloud does nothing**: The Copilot key emits `Meta+Shift+F23`; the assistant listens for `F23`. Confirm your key sends it with `sudo .venv/bin/python key_detector.py` (tap the Copilot key, look for `KEY_F23`). If nothing is selected and the clipboard is empty, you'll hear a short low beep instead.
+- **Read-aloud does nothing**: The Copilot key emits `Meta+Shift+F23`; the assistant listens for `F23`. Confirm your key sends it with `sudo .venv/bin/python key_detector.py` (tap the Copilot key, look for `KEY_F23`). Right Ctrl counts only when tapped alone and released within half a second; as part of a shortcut (Right Ctrl+C) it does nothing. If nothing is selected and the clipboard is empty, you'll hear a short low beep instead.
 - **Recordings produce no text**: Each recording logs `Audio: <length>, peak <level>, gain <boost>`. Recordings are centred (DC offset removed) and quiet ones are boosted up to 10×, which rescues built-in laptop mics that deliver very quiet audio on a DC offset. A peak well below ~0.01 while you were speaking means the mic is barely picking you up: pick another device in the tray, or raise the capture/boost level in `alsamixer` (F4).
 - **Text isn't pasting**:
     - The assistant uses `wl-copy` and the RemoteDesktop portal to press Ctrl+Shift+V by default (works in terminals and most editors). If you declined GNOME's keyboard prompt, the text is left on the clipboard and a notice says so: delete `~/.config/voice-assistant/portal_restore_token` and restart to be asked again. If your target app does not accept Ctrl+Shift+V (e.g. LibreOffice), toggle off "Use Ctrl+Shift+V (terminal-compatible)" in the tray menu to fall back to plain Ctrl+V.
