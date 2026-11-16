@@ -27,5 +27,5 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.pytest.ini_options]
-# tools/ holds manual scripts named test_*.py that type into the focused window.
+# Only tests/: tools/ holds manual scripts, not tests.
 testpaths = ["tests"]
