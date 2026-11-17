@@ -950,6 +950,11 @@ class VoiceAssistant:
         print("Test injection sequence complete.")
 
 def main():
+    # Launched from the desktop, output goes to the journal through a socket,
+    # where Python buffers it in blocks: dictations would show up there (and
+    # in `text_corrections.py history`) only kilobytes later.
+    sys.stdout.reconfigure(line_buffering=True)
+    sys.stderr.reconfigure(line_buffering=True)
     parser = argparse.ArgumentParser(description="Local voice assistant with push-to-talk.")
     parser.add_argument("--device", type=str, help="Preferred input device name or index")
     parser.add_argument("--test-injection", action="store_true", help="Test text injection and exit")
