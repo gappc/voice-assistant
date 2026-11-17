@@ -26,6 +26,8 @@ Command line (`uv run text_corrections.py --help`):
 
 import argparse
 import difflib
+import functools
+import glob
 import json
 import os
 import re
@@ -33,6 +35,7 @@ import subprocess
 import sys
 import tomllib
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 
 
@@ -46,18 +49,20 @@ class Rule:
     pattern: re.Pattern
     replace: str  # re.sub template
     examples: tuple = field(default=())  # (input, expected) pairs
+    spec: dict = field(default=None, compare=False)  # the rule table it came from
 
     @classmethod
-    def make(cls, regex, template, examples=()):
-        rule = cls(re.compile(regex, re.IGNORECASE), template, tuple(examples))
+    def make(cls, regex, template, examples=(), spec=None):
+        rule = cls(re.compile(regex, re.IGNORECASE), template, tuple(examples), spec)
         rule.pattern.sub(rule.replace, "")  # validates group references
         return rule
 
     @classmethod
     def from_spec(cls, spec, examples=()):
         """Rule from a rule table (see module docstring). ValueError if invalid."""
+        clean = {k: spec[k] for k in SPEC_KEYS if k in spec}
         try:
-            return cls.make(*compile_spec(spec), examples)
+            return cls.make(*compile_spec(spec), examples, clean)
         except re.error as exc:
             raise ValueError(f"invalid regex: {exc}") from None
 
@@ -117,8 +122,12 @@ def load_rules(path):
     path = Path(path)
     if not path.exists():
         return []
+    return load_rules_text(path.read_text(encoding="utf-8"), path)
+
+
+def load_rules_text(text, path="rules"):
     try:
-        data = tomllib.loads(path.read_text(encoding="utf-8"))
+        data = tomllib.loads(text)
     except tomllib.TOMLDecodeError as exc:
         raise ValueError(f"{path}: {exc}") from None
     rules = []
@@ -348,13 +357,20 @@ def append_rule(path, spec, examples):
 
 # --- Past dictations ---------------------------------------------------
 
-def dictations_from_journal(journal_text):
-    """Raw recognized texts, oldest first, without duplicates. Since rules
-    exist, each dictation logs 'Recognized:' (raw) then 'Injecting:'
-    (corrected); older logs only have 'Injecting:', which was raw then."""
-    seen, out, after_recognized = set(), [], False
-    for line in journal_text.splitlines():
-        m = re.search(r"\b(Recognized|Injecting): (.*)$", line)
+@dataclass(frozen=True)
+class Dictation:
+    text: str
+    when: datetime | None = None  # last time this exact text was dictated
+
+
+def dictations_from_messages(messages):
+    """Raw recognized texts from (when, log message) pairs, in order of first
+    appearance, without duplicates. Since rules exist, each dictation logs
+    'Recognized:' (raw) then 'Injecting:' (corrected); older logs only have
+    'Injecting:', which was raw then."""
+    found, after_recognized = {}, False
+    for when, message in messages:
+        m = re.match(r"(Recognized|Injecting): (.*)$", message)
         if not m:
             continue
         kind, text = m.groups()
@@ -362,21 +378,262 @@ def dictations_from_journal(journal_text):
             after_recognized = False
             continue
         after_recognized = kind == "Recognized"
-        if text not in seen:
-            seen.add(text)
-            out.append(text)
-    return out
+        found.pop(text, None)  # re-insert: keeps the latest time
+        found[text] = when
+    return [Dictation(text, when) for text, when in found.items()]
 
 
-def load_history():
+def dictations_from_journal(journal_text):
+    """Texts from `journalctl -o cat`-style output (one message per line)."""
+    lines = (re.sub(r"^.*?\b(?=(Recognized|Injecting): )", "", line)
+             for line in journal_text.splitlines())
+    return [d.text for d in dictations_from_messages((None, line) for line in lines)]
+
+
+def load_dictations():
+    """Past dictations from the user journal, with their time."""
     try:
-        journal = subprocess.run(
-            ["journalctl", "--user", "-o", "cat", "--no-pager", "--grep", "^(Recognized|Injecting): "],
+        out = subprocess.run(
+            ["journalctl", "--user", "-o", "json", "--no-pager",
+             "--output-fields=MESSAGE,__REALTIME_TIMESTAMP",
+             "--grep", "^(Recognized|Injecting): "],
             capture_output=True, text=True, check=False,
         ).stdout
     except FileNotFoundError:
         return []
-    return dictations_from_journal(journal)
+    messages = []
+    for line in out.splitlines():
+        try:
+            entry = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        message = entry.get("MESSAGE")
+        if isinstance(message, list):  # journald sends non-UTF-8 text as bytes
+            message = bytes(message).decode("utf-8", "replace")
+        if not isinstance(message, str):
+            continue
+        stamp = entry.get("__REALTIME_TIMESTAMP")
+        when = datetime.fromtimestamp(int(stamp) / 1e6) if stamp else None
+        messages.append((when, message))
+    return dictations_from_messages(messages)
+
+
+def load_history():
+    return [d.text for d in load_dictations()]
+
+
+@dataclass(frozen=True)
+class Hit:
+    when: datetime | None
+    before: str
+    after: str
+
+
+@dataclass
+class RuleStats:
+    hits: int = 0                     # past dictations the rule changed
+    last: datetime | None = None      # latest of those
+    changes: list = field(default_factory=list)  # Hit per change, for the rule's own step
+
+
+def rule_stats(rules, dictations):
+    """How often each rule fired on past dictations, applying the rules in
+    order as the app does."""
+    stats = [RuleStats() for _ in rules]
+    for d in dictations:
+        text = d.text
+        for rule, st in zip(rules, stats):
+            out = rule.pattern.sub(rule.replace, text)
+            if out != text:
+                st.hits += 1
+                st.changes.append(Hit(d.when, text, out))
+                if d.when and (st.last is None or d.when > st.last):
+                    st.last = d.when
+            text = out
+    return stats
+
+
+def all_changes(rules, dictations):
+    """(dictation, corrected text, indices of the rules that fired) for every
+    past dictation the rules change, newest first."""
+    out = []
+    for d in dictations:
+        text, fired = d.text, []
+        for i, rule in enumerate(rules):
+            new = rule.pattern.sub(rule.replace, text)
+            if new != text:
+                fired.append(i)
+            text = new
+        if fired:
+            out.append((d, text, fired))
+    return sorted(out, key=lambda c: c[0].when or datetime.min, reverse=True)
+
+
+_DIFF_TOKEN = re.compile(r"\s+|\w+|[^\w\s]")
+
+
+def inline_diff(before, after):
+    """Word-level diff as [(op, text)], op "=" kept, "-" removed, "+" added,
+    for showing a change in one line."""
+    a, b = _DIFF_TOKEN.findall(before), _DIFF_TOKEN.findall(after)
+    parts = []
+    for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(None, a, b, autojunk=False).get_opcodes():
+        if tag == "equal":
+            parts.append(("=", "".join(a[i1:i2])))
+            continue
+        if i2 > i1:
+            parts.append(("-", "".join(a[i1:i2])))
+        if j2 > j1:
+            parts.append(("+", "".join(b[j1:j2])))
+    return parts
+
+
+# --- Common words --------------------------------------------------------
+
+DICTIONARY_GLOBS = ("/usr/share/hunspell/de_*.dic", "/usr/share/hunspell/en_*.dic",
+                    "/usr/share/dict/words")
+
+
+@functools.cache
+def dictionary_words():
+    """Lower-cased words from the installed German/English word lists
+    (hunspell stems and /usr/share/dict/words); empty if none are installed."""
+    words = set()
+    for pattern in DICTIONARY_GLOBS:
+        for path in glob.glob(pattern):
+            try:
+                with open(path, encoding="utf-8", errors="replace") as f:
+                    for line in f:
+                        word = line.split("/", 1)[0].strip()
+                        if word and not word.isdigit():
+                            words.add(word.lower())
+            except OSError:
+                continue
+    return frozenset(words)
+
+
+def common_variants(spec, words=None):
+    """The single-word variants of a plain rule that are ordinary words, so
+    the rule would also hit correct text unless it has context words."""
+    if "regex" in spec or spec.get("followed_by") or spec.get("preceded_by"):
+        return []
+    words = dictionary_words() if words is None else words
+    return [v for v in spec.get("replace", []) if " " not in v.strip() and v.strip().lower() in words]
+
+
+# --- Editing rules in place -------------------------------------------------
+
+_HEADER = re.compile(r"^\[\[rule\]\][ \t]*(#.*)?$", re.MULTILINE)
+
+
+def rule_blocks(text):
+    """(start, end) of each [[rule]] block, including the comment lines
+    directly above its header, so deleting a rule takes its comment along."""
+    headers = [m.start() for m in _HEADER.finditer(text)]
+    starts = []
+    for h in headers:
+        start = h
+        while start > 0:
+            prev_end = start - 1
+            prev_start = text.rfind("\n", 0, prev_end) + 1
+            if text[prev_start:prev_end].lstrip().startswith("#"):
+                start = prev_start
+            else:
+                break
+        starts.append(start)
+    ends = starts[1:] + [len(text)]
+    return list(zip(starts, ends))
+
+
+def _value_span(block, key):
+    """(start, end) of the line(s) assigning `key` in a rule block, or None."""
+    m = re.search(rf"^{key}[ \t]*=[ \t]*", block, re.MULTILINE)
+    if not m:
+        return None
+    i, depth, quote = m.end(), 0, None
+    while i < len(block):
+        c = block[i]
+        if quote:
+            if c == "\\" and quote == '"':
+                i += 1
+            elif c == quote:
+                quote = None
+        elif c in "'\"":
+            quote = c
+        elif c == "[":
+            depth += 1
+        elif c == "]":
+            depth -= 1
+        elif c == "#" and depth == 0:
+            break
+        elif c == "\n" and depth == 0:
+            break
+        i += 1
+    end = block.find("\n", i)
+    return m.start(), (len(block) if end == -1 else end + 1)
+
+
+def _render(key, value):
+    if key == "examples":
+        rows = "".join(f"  {_toml_list(ex)},\n" for ex in value)
+        return f"examples = [\n{rows}]\n"
+    if isinstance(value, list):
+        return f"{key} = {_toml_list(value)}\n"
+    return f"{key} = {_toml_str(value)}\n"
+
+
+def _write_checked(path, new_text):
+    try:
+        load_rules_text(new_text)
+    except ValueError as exc:
+        raise ValueError(f"edit would make the rules file invalid: {exc}") from None
+    tmp = Path(path).with_name(Path(path).name + ".tmp")
+    tmp.write_text(new_text, encoding="utf-8")
+    tmp.replace(path)
+
+
+def update_rule(path, index, changes=None, add_examples=()):
+    """Set keys of rule `index` (0-based, file order) and append examples,
+    keeping everything else in the file as written."""
+    path = Path(path)
+    text = path.read_text(encoding="utf-8")
+    start, end = rule_blocks(text)[index]
+    block = text[start:end]
+    current = tomllib.loads(text)["rule"][index]
+    changes = dict(changes or {})
+    if add_examples:
+        changes["examples"] = [*map(tuple, current.get("examples", [])), *add_examples]
+    for key, value in changes.items():
+        span = _value_span(block, key)
+        line = _render(key, value)
+        if span:
+            block = block[:span[0]] + line + block[span[1]:]
+        else:  # new key: right after the header line
+            h = _HEADER.search(block)
+            pos = block.find("\n", h.end()) + 1 or len(block)
+            block = block[:pos] + line + block[pos:]
+    _write_checked(path, text[:start] + block + text[end:])
+
+
+def delete_rule(path, index):
+    path = Path(path)
+    text = path.read_text(encoding="utf-8")
+    start, end = rule_blocks(text)[index]
+    _write_checked(path, text[:start] + text[end:])
+
+
+def variant_target(rules, spec):
+    """Index of an existing plain rule with the same result and context, to
+    which the variants of `spec` can be added instead of a new rule."""
+    def key(s):
+        return (s.get("with"), tuple(sorted(map(str.lower, s.get("followed_by", [])))),
+                tuple(sorted(map(str.lower, s.get("preceded_by", [])))))
+    if "regex" in spec:
+        return None
+    for i, rule in enumerate(rules):
+        if rule.spec and "regex" not in rule.spec and key(rule.spec) == key(spec):
+            return i
+    return None
 
 
 # --- Command line ------------------------------------------------------

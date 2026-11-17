@@ -291,3 +291,115 @@ def test_cli_add_creates_one_rule_per_separate_change(tmp_path, monkeypatch, cap
     assert len(rules) == 2 and tc.check(rules) == []
     out = capsys.readouterr().out
     assert "komm mitten -> committen" in out and "den -> in" in out
+
+
+# --- Statistics, common words, editing in place -----------------------------
+
+from datetime import datetime
+
+
+def test_dictations_from_messages_keep_latest_time_and_raw_text():
+    t1, t2, t3 = (datetime(2026, 11, d) for d in (1, 2, 3))
+    msgs = [(t1, "Injecting: alt"), (t2, "Recognized: Link API"), (t2, "Injecting: Lynq API"),
+            (t3, "Recognized: alt"), (t3, "Injecting: alt"), (t3, "Audio: 1.0s")]
+    assert tc.dictations_from_messages(msgs) == [
+        tc.Dictation("Link API", t2), tc.Dictation("alt", t3)]
+
+
+def test_rule_stats_count_hits_in_file_order():
+    rules = [tc.Rule.from_spec({"replace": ["Lync"], "with": "Lynq"}),
+             tc.Rule.from_spec({"replace": ["Lynq"], "with": "LYNQ"}),
+             tc.Rule.from_spec({"replace": ["nie"], "with": "x"})]
+    t1, t2 = datetime(2026, 11, 1), datetime(2026, 11, 5)
+    stats = tc.rule_stats(rules, [tc.Dictation("Lync API", t2), tc.Dictation("Lynq", t1),
+                                  tc.Dictation("nichts", None)])
+    assert [s.hits for s in stats] == [1, 2, 0]
+    assert stats[0].last == t2 and stats[1].last == t2 and stats[2].last is None
+    assert stats[1].changes == [tc.Hit(t2, "Lynq API", "LYNQ API"), tc.Hit(t1, "Lynq", "LYNQ")]
+
+
+def test_all_changes_lists_corrected_dictations_newest_first_with_fired_rules():
+    rules = [tc.Rule.from_spec({"replace": ["Lync"], "with": "Lynq"}),
+             tc.Rule.from_spec({"replace": ["bush"], "with": "push"})]
+    t1, t2 = datetime(2026, 11, 1), datetime(2026, 11, 5)
+    old, new, none = (tc.Dictation("Lync und bush", t1), tc.Dictation("bush", t2),
+                      tc.Dictation("nichts", t2))
+    assert tc.all_changes(rules, [old, none, new]) == [
+        (new, "push", [1]), (old, "Lynq und push", [0, 1])]
+
+
+def test_inline_diff_marks_changed_words_only():
+    assert tc.inline_diff("die alte Link API.", "die alte Lynq API.") == [
+        ("=", "die alte "), ("-", "Link"), ("+", "Lynq"), ("=", " API.")]
+    assert tc.inline_diff("komm mitten und", "committen und") == [
+        ("-", "komm mitten"), ("+", "committen"), ("=", " und")]
+
+
+def test_common_variants_flags_single_dictionary_words_without_context():
+    words = {"link", "bush", "den"}
+    assert tc.common_variants({"replace": ["Link", "Kommitten", "komm mitten"], "with": "x"},
+                              words) == ["Link"]
+    assert tc.common_variants({"replace": ["Link"], "with": "x", "followed_by": ["API"]},
+                              words) == []
+
+
+EDIT_FILE = """# header comment
+
+# Lynq misspellings
+[[rule]]
+replace = ["Lync", "Lynch"]   # trailing comment
+with = "Lynq"
+examples = [
+  ["Die Lync API", "Die Lynq API"],
+]
+
+[[rule]]
+replace = ['komm mitten']
+with = 'committen'
+examples = [['bitte komm mitten', 'bitte committen']]
+"""
+
+
+def test_update_rule_adds_variants_and_examples_keeping_the_rest(tmp_path):
+    path = write(tmp_path / "c.toml", EDIT_FILE)
+    tc.update_rule(path, 1, {"replace": ["komm mitten", "Kommitten"]},
+                   add_examples=[("Ja, Kommitten und", "Ja, committen und")])
+    text = path.read_text()
+    assert text.startswith("# header comment\n\n# Lynq misspellings\n[[rule]]\n")
+    assert '"Lynch"]   # trailing comment' in text
+    rules = tc.load_rules(path)
+    assert rules[1].spec["replace"] == ["komm mitten", "Kommitten"]
+    assert rules[1].examples == (("bitte komm mitten", "bitte committen"),
+                                 ("Ja, Kommitten und", "Ja, committen und"))
+    assert tc.check(rules) == []
+
+
+def test_update_rule_can_add_a_missing_key(tmp_path):
+    path = write(tmp_path / "c.toml", EDIT_FILE)
+    tc.update_rule(path, 0, {"followed_by": ["API"]})
+    assert tc.load_rules(path)[0].spec["followed_by"] == ["API"]
+
+
+def test_delete_rule_removes_its_block_and_comment(tmp_path):
+    path = write(tmp_path / "c.toml", EDIT_FILE)
+    tc.delete_rule(path, 0)
+    text = path.read_text()
+    assert "Lynq misspellings" not in text and "Lync" not in text
+    assert text.startswith("# header comment\n\n[[rule]]\nreplace = ['komm mitten']")
+    assert len(tc.load_rules(path)) == 1
+
+
+def test_editing_refuses_to_write_an_invalid_file(tmp_path):
+    path = write(tmp_path / "c.toml", EDIT_FILE)
+    with pytest.raises(ValueError):
+        tc.update_rule(path, 0, {"replace": []})
+    assert path.read_text() == EDIT_FILE
+
+
+def test_variant_target_matches_result_and_context():
+    rules = [tc.Rule.from_spec({"replace": ["Link"], "with": "Lynq", "followed_by": ["API"]}),
+             tc.Rule.from_spec({"replace": ["komm mitten"], "with": "committen"})]
+    assert tc.variant_target(rules, {"replace": ["Kommitten"], "with": "committen"}) == 1
+    assert tc.variant_target(rules, {"replace": ["Lync"], "with": "Lynq",
+                                     "followed_by": ["api"]}) == 0
+    assert tc.variant_target(rules, {"replace": ["Lync"], "with": "Lynq"}) is None

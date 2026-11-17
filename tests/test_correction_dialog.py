@@ -27,7 +27,7 @@ def test_editing_should_be_suggests_a_plain_word_rule(app, tmp_path):
     dlg.fixed.setText("Für das Projekt Lynq.")
     assert (dlg.wrong.text(), dlg.right.text()) == ("Link", "Lynq")
     assert "1 of 2" in dlg.status.text()
-    assert "+ Gib mir einen Lynq." in dlg.preview.toPlainText()
+    assert dlg.shown_side_effects == [("Gib mir einen Link.", "Gib mir einen Lynq.")]
 
     dlg.preceded_by.setText("Projekt")  # narrow the rule
     assert "none of 2" in dlg.status.text()
@@ -87,7 +87,7 @@ def test_check_button_verifies_the_rules_file(app, tmp_path):
     path.write_text("[[rule]]\nreplace = ['Lync']\nwith = 'Lynq'\nexamples = [['Lync', 'falsch']]\n")
     dlg.check_button.click()
     assert "1 of 1 examples fail" in dlg.status.text()
-    assert "want falsch" in dlg.preview.toPlainText()
+    assert "falsch" in dlg.preview.toPlainText()
 
     path.write_text("[[rule]]\nwith = 'x'\n")
     dlg.check_button.click()
@@ -113,7 +113,7 @@ def test_separate_changes_are_saved_one_rule_at_a_time(app, tmp_path):
     assert dlg.result() == 0
     assert (dlg.wrong.text(), dlg.right.text()) == ("den", "in")
     assert "✓ Saved rule 1: komm mitten -> committen" in dlg.status.text()
-    assert "+ Er soll in Main mergen." in dlg.preview.toPlainText()
+    assert ("Er soll den Main mergen.", "Er soll in Main mergen.") in dlg.shown_side_effects
     dlg.reject()  # "den" -> "in" was a one-off: no rule
 
     rules = tc.load_rules(path)
@@ -150,3 +150,46 @@ def test_single_change_shows_no_step_counter(app, tmp_path):
     dlg.fixed.setText("die Lynq Doku")
     assert "of" not in dlg.rule_header.text()
     assert save_button(dlg).text() == "Save"
+
+
+def test_variant_of_an_existing_rule_is_offered_and_merged(app, tmp_path):
+    path = tmp_path / "c.toml"
+    path.write_text("# commit\n[[rule]]\nreplace = ['komm mitten']\nwith = 'committen'\n"
+                    "examples = [['bitte komm mitten', 'bitte committen']]\n")
+    raw = "Ja, Kommitten und weiter."
+    dlg = CorrectionDialog(raw, raw, path, [])
+    dlg.fixed.setText("Ja, committen und weiter.")
+    assert dlg.merge_box.isVisibleTo(dlg) and dlg.merge_box.isChecked()
+    assert "komm mitten -> committen" in dlg.merge_box.text()
+
+    dlg.merge_box.setChecked(False)          # a manual uncheck survives further edits
+    dlg.followed_by.setText("und")
+    dlg.followed_by.setText("")
+    assert not dlg.merge_box.isChecked()
+    dlg.merge_box.setChecked(True)
+    save_button(dlg).click()
+
+    rules = tc.load_rules(path)
+    assert len(rules) == 1
+    assert rules[0].spec["replace"] == ["komm mitten", "Kommitten"]
+    assert len(rules[0].examples) == 2 and tc.check(rules) == []
+    assert path.read_text().startswith("# commit\n")
+
+
+def test_unchecked_merge_appends_a_new_rule(app, tmp_path):
+    path = tmp_path / "c.toml"
+    path.write_text("[[rule]]\nreplace = ['komm mitten']\nwith = 'committen'\n")
+    dlg = CorrectionDialog("Kommitten", "Kommitten", path, [])
+    dlg.fixed.setText("committen")
+    dlg.merge_box.setChecked(False)
+    save_button(dlg).click()
+    assert len(tc.load_rules(path)) == 2
+
+
+def test_ordinary_word_without_context_is_warned_about(app, tmp_path, monkeypatch):
+    monkeypatch.setattr(tc, "dictionary_words", lambda: frozenset({"link"}))
+    dlg = CorrectionDialog("die Link Doku", "die Link Doku", tmp_path / "c.toml", [])
+    dlg.fixed.setText("die Lynq Doku")
+    assert "“Link” is an ordinary word" in dlg.status.text()
+    dlg.followed_by.setText("Doku")
+    assert "ordinary word" not in dlg.status.text()

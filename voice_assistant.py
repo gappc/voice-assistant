@@ -734,6 +734,8 @@ class VoiceAssistant:
 
         fix_action = self.tray_menu.addAction("Fix Last Dictation…")
         fix_action.triggered.connect(self.on_fix_last_dictation)
+        rules_action = self.tray_menu.addAction("Correction Rules…")
+        rules_action.triggered.connect(self.on_show_rules)
 
         paste_action =self.tray_menu.addAction("Use Ctrl+Shift+V (terminal-compatible)")
         paste_action.setCheckable(True)
@@ -765,6 +767,20 @@ class VoiceAssistant:
         
         print("Tray icon started (PySide6).")
         return self.app.exec()
+
+    def on_show_rules(self):
+        from rules_dialog import RulesDialog  # Qt widgets, only when used
+
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            dictations = text_corrections.load_dictations()
+        finally:
+            QApplication.restoreOverrideCursor()
+        dialog = RulesDialog(self.corrector.path, dictations)
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+        dialog.exec()
 
     def on_fix_last_dictation(self):
         if not self.last_dictation:

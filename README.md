@@ -128,6 +128,18 @@ in the rule fields (the sentence follows). The dialog shows which earlier dictat
 by" until only the right ones remain, then save. The rule is appended with your
 sentence as its example.
 
+If the new rule has the same result and context words as an existing one, the
+dialog offers to add the words as variants of that rule instead, which keeps the
+file short. It warns when a word to replace is an ordinary word (found in the
+installed hunspell/`/usr/share/dict` word lists) and has no context words. Only
+English lists are usually installed; `sudo apt install hunspell-de-de` adds German.
+
+**Correction Rules…** in the tray lists every rule with how often it fired on past
+dictations and when last, flags ordinary words and rules that never fired, shows
+a rule's examples and matches, and can delete a rule or open the file in your
+editor. The numbers come from the journal, so they include dictations from before
+the rule existed.
+
 **Command line** (`uv run text_corrections.py …`):
 
 - `check`: verify every example against all rules (a new rule may break an old one)

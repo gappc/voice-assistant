@@ -11,9 +11,10 @@ import html
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
-    QDialog, QDialogButtonBox, QFormLayout, QLabel, QLineEdit, QPlainTextEdit, QVBoxLayout,
+    QCheckBox, QDialog, QDialogButtonBox, QFormLayout, QLabel, QLineEdit, QTextEdit, QVBoxLayout,
 )
 
+import change_view as cv
 import text_corrections as tc
 
 SHOWN_SIDE_EFFECTS = 30
@@ -49,9 +50,14 @@ class CorrectionDialog(QDialog):
         self.followed_by.setPlaceholderText("optional, e.g. API, Projekt")
         self.preceded_by = QLineEdit()
         self.preceded_by.setPlaceholderText("optional, e.g. Projekt")
+        self.merge_box = QCheckBox()  # "add as variant to an existing rule"
+        self.merge_box.setVisible(False)
+        self.merge_target = None   # rule index the variants would go to
+        self._offered = None       # last offered target, to keep a manual uncheck
         self.status = QLabel()
         self.status.setWordWrap(True)
-        self.preview = QPlainTextEdit(readOnly=True)
+        self.preview = QTextEdit(readOnly=True)
+        self.shown_side_effects = []  # (before, after) listed in the preview
 
         form = QFormLayout()
         form.addRow("Recognized:", recognized)
@@ -76,6 +82,7 @@ class CorrectionDialog(QDialog):
 
         layout = QVBoxLayout(self)
         layout.addLayout(form)
+        layout.addWidget(self.merge_box)
         layout.addWidget(self.status)
         layout.addWidget(self.preview)
         layout.addWidget(hint)
@@ -167,7 +174,10 @@ class CorrectionDialog(QDialog):
         save = self.buttons.button(QDialogButtonBox.Save)
         save.setEnabled(False)
         self._show_step([])
-        self.preview.setPlainText("")
+        self.merge_target = None
+        self.merge_box.setVisible(False)
+        self.preview.clear()
+        self.shown_side_effects = []
         if not _split(self.wrong.text()):
             if self.saved and self.current == self.fixed.text():
                 self.status.setText("✓ The dictation is fully corrected.")
@@ -182,27 +192,33 @@ class CorrectionDialog(QDialog):
         if ev.result == self.current:
             self.status.setText("This rule changes nothing in the dictation.")
             return
-        lines, notes = [], []
+        parts, notes = [], []
         if self.saved:
             notes.append(f"✓ Saved rule {len(self.saved)}: {tc.describe(self.saved[-1])}")
         if ev.broken_examples:
             notes.append(f"⚠ Breaks {len(ev.broken_examples)} existing example(s) – narrow "
                          "the rule with “Only if followed/preceded by” to save it.")
-            for src, want, got in ev.broken_examples:
-                lines += [f"BROKEN  {src}", f"   want {want}", f"   got  {got}", ""]
+            parts += [cv.heading("Existing examples this rule breaks:"),
+                      cv.failures(ev.broken_examples, "BROKEN")]
+        if common := tc.common_variants(self.spec()):
+            words = ", ".join(f"“{w}”" for w in common)
+            notes.append(f"⚠ {words} is an ordinary word, so the rule changes it everywhere. "
+                         "Add a word to “Only if followed/preceded by” unless that is what you want.")
         if ev.side_effects:
             notes.append(f"Would also change {len(ev.side_effects)} of {len(self.history)} "
                          "earlier dictations. If any are wrong, add words to "
                          "“Only if followed/preceded by”.")
-            for before, after in ev.side_effects[:SHOWN_SIDE_EFFECTS]:
-                lines += [f"- {before}", f"+ {after}", ""]
+            self.shown_side_effects = ev.side_effects[:SHOWN_SIDE_EFFECTS]
+            parts.append(cv.heading("Earlier dictations this rule would also change:"))
+            parts += [cv.line(cv.diff(b, a)) for b, a in self.shown_side_effects]
             if len(ev.side_effects) > SHOWN_SIDE_EFFECTS:
-                lines.append(f"… and {len(ev.side_effects) - SHOWN_SIDE_EFFECTS} more")
+                parts.append(cv.text(f"… and {len(ev.side_effects) - SHOWN_SIDE_EFFECTS} more"))
         else:
             notes.append(f"Changes none of {len(self.history)} earlier dictations.")
         self._show_step(tc.suggest_changes(ev.result, self.fixed.text()))
         self.status.setText("\n".join(notes))
-        self.preview.setPlainText("\n".join(lines))
+        self.preview.setHtml("".join(parts))
+        self._offer_merge()
         save.setEnabled(not ev.broken_examples)
 
     def _check_all(self):
@@ -212,25 +228,47 @@ class CorrectionDialog(QDialog):
             rules = tc.load_rules(self.path)
         except ValueError as exc:
             self.status.setText(f"⚠ Rules file is invalid: {exc}")
-            self.preview.setPlainText("")
+            self.preview.clear()
             return
         failures = tc.check(rules)
         total = sum(len(r.examples) for r in rules)
         counts = f"{len(rules)} rule{'s' if len(rules) != 1 else ''}"
         if failures:
             self.status.setText(f"⚠ Rules file: {counts}, {len(failures)} of {total} examples fail.")
-            lines = []
-            for src, want, got in failures:
-                lines += [f"FAIL  {src}", f"   want {want}", f"   got  {got}", ""]
-            self.preview.setPlainText("\n".join(lines))
+            self.preview.setHtml(cv.failures(failures, "FAIL"))
         else:
             self.status.setText(f"✓ Rules file: {counts}, all {total} examples pass.")
-            self.preview.setPlainText("")
+            self.preview.clear()
+
+    def _offer_merge(self):
+        """Offer to add the variants to an existing rule with the same result
+        and context, which keeps the rules file short."""
+        spec = self.spec()
+        target = tc.variant_target(self.existing, spec)
+        if target is not None:
+            known = {v.lower() for v in self.existing[target].spec["replace"]}
+            if all(v.lower() in known for v in spec["replace"]):
+                target = None
+        if target is not None and target != self._offered:
+            self.merge_box.setChecked(True)
+            self._offered = target
+        self.merge_target = target
+        self.merge_box.setVisible(target is not None)
+        if target is not None:
+            self.merge_box.setText("Add as variant to the existing rule: "
+                                   + tc.describe(self.existing[target].spec))
 
     def _save(self):
         spec = self.spec()
         rule = tc.Rule.from_spec(spec)
-        tc.append_rule(self.path, spec, self._examples(rule))
+        examples = self._examples(rule)
+        if self.merge_target is not None and self.merge_box.isChecked():
+            old = self.existing[self.merge_target].spec["replace"]
+            new = [v for v in spec["replace"] if v.lower() not in {o.lower() for o in old}]
+            tc.update_rule(self.path, self.merge_target, {"replace": [*old, *new]},
+                           add_examples=examples)
+        else:
+            tc.append_rule(self.path, spec, examples)
         self.saved.append(spec)
         self.existing = tc.load_rules(self.path)
         if not tc.suggest_changes(self.current, self.fixed.text()):
