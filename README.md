@@ -8,7 +8,7 @@ A fast, privacy-respecting, and reliable local voice-to-text assistant designed 
 - **Multilingual Dictation**: English, German and 23 other European languages, detected per recording; there is no language to pick.
 - **Read Aloud (Text-to-Speech)**: Tap the **Copilot key** (right of AltGr), or on keyboards without one tap **Right Ctrl** on its own, to have your highlighted selection (or clipboard) read aloud with a natural local voice via [Kokoro-82M](https://huggingface.co/hexgrad/Kokoro-82M). Tap again to stop. Fully offline after a one-time model download.
 - **Wayland-Native Global Hotkeys without the `input` group**: A tiny root-installed system service (`hotkey_helper/voice-hotkeyd.py`) reads the keyboards and passes on only Right Alt, F23 and lone Right Ctrl taps over a Unix socket. Your user, and so every program you run, never gets to read keystrokes.
-- **Layout-Independent Text Injection**: Uses `wl-copy` and the RemoteDesktop portal (Ctrl+Shift+V by default) to paste the transcribed text. This ensures 100% accuracy for special characters and prevents mixed-up letters on non-US layouts (like Z/Y on German QWERTZ). The default Ctrl+Shift+V works in terminals as well as editors and IDEs; a tray menu toggle is provided to switch to plain Ctrl+V for apps that reserve Ctrl+Shift+V (e.g. LibreOffice "Paste Special").
+- **Layout-Independent Text Injection**: Uses `wl-copy` and the RemoteDesktop portal (Ctrl+Shift+V by default) to paste the transcribed text. This ensures 100% accuracy for special characters and prevents mixed-up letters on non-US layouts (like Z/Y on German QWERTZ). The default Ctrl+Shift+V works in terminals as well as editors and IDEs; a tray menu toggle is provided to switch to plain Ctrl+V for apps that reserve Ctrl+Shift+V (e.g. LibreOffice "Paste Special"). Whatever was on the clipboard before is put back half a second after the paste (tray toggle "Restore clipboard after pasting"). Wayland lets `wl-copy` offer only one format, so rich text comes back as plain text; images and plain text come back unchanged.
 - **Audio Feedback**: Plays subtle beeps indicating when recording starts and stops—no need to look at a terminal or status bar.
 - **GPU Transcription**: Runs on the GPU through Vulkan (including AMD/Intel integrated graphics) via [parakeet.cpp](https://github.com/mudler/parakeet.cpp), taking ~0.1 s per phrase with almost no CPU use, and falls back to the CPU when no Vulkan device is found. Silence and key clicks produce no text.
 - **Background Service & Desktop Integration**: Includes a simple `.desktop` file for easy launching from your app menu or startup applications.
@@ -119,7 +119,8 @@ uv run voice_assistant.py --test-read "Hello from the local voice assistant."
 ## Settings
 
 Every setting you change from the tray menu — input device, output device, voice,
-reading speed, and the Ctrl+Shift+V paste-mode toggle — is remembered across
+reading speed, the Ctrl+Shift+V paste-mode toggle and the clipboard-restore
+toggle — is remembered across
 restarts. Settings are stored as JSON in `~/.config/voice-assistant/settings.json`
 (respects `$XDG_CONFIG_HOME`). Delete the file to reset everything to defaults.
 

@@ -17,6 +17,7 @@ from PySide6.QtWidgets import QApplication, QSystemTrayIcon, QMenu
 from PySide6.QtGui import QIcon, QAction, QCursor, QPixmap, QPainter, QColor, QBrush, QActionGroup
 from PySide6.QtCore import QTimer, Qt, Signal, QObject
 
+import clipboard_backup
 import tray_settings
 from speech_reader import SpeechReader, VOICE_CATALOG, DEFAULT_VOICE
 from speech_recognizer import SpeechRecognizer
@@ -31,6 +32,9 @@ SAMPLERATE = 16000
 # Copilot key). The app itself never sees a keystroke.
 HOTKEY_SOCKET = os.environ.get("VOICE_HOTKEY_SOCKET", "/run/voice-hotkey.sock")
 HOTKEY_RETRY_SECONDS = 2.0
+# Wait after Ctrl+V before putting the previous clipboard back. Apps read the
+# clipboard asynchronously; too short and they paste the old content.
+CLIPBOARD_RESTORE_DELAY = 0.5
 # Linux keycodes for the paste shortcut, sent through the RemoteDesktop portal.
 KEY_LEFTCTRL, KEY_LEFTSHIFT, KEY_V = 29, 42, 47
 READ_SPEED = 1.0  # playback speed multiplier (1.0 = normal; >1 faster, <1 slower)
@@ -136,6 +140,7 @@ class _StartupSettings(NamedTuple):
     voice: str
     speed: float
     paste_with_shift: bool
+    restore_clipboard: bool
 
 
 def _resolve_startup_settings(initial_device, settings_path):
@@ -152,6 +157,7 @@ def _resolve_startup_settings(initial_device, settings_path):
         voice=voice,
         speed=speed,
         paste_with_shift=settings.paste_with_shift,
+        restore_clipboard=settings.restore_clipboard,
     )
 
 
@@ -196,6 +202,7 @@ class VoiceAssistant:
         # Ctrl+Shift+V works in terminals and most editors; flip off for apps
         # that reserve it (e.g. LibreOffice "Paste Special").
         self.paste_with_shift = startup.paste_with_shift
+        self.restore_clipboard = startup.restore_clipboard
         self.keyboard = PortalKeyboard(self._settings_path.parent / "portal_restore_token")
 
         # Setup signal handlers
@@ -322,6 +329,7 @@ class VoiceAssistant:
             return
 
         print(f"Injecting: {text}")
+        backup = clipboard_backup.save() if self.restore_clipboard else None
         try:
             print("  - Copying to clipboard...")
             subprocess.run(["wl-copy", text], check=True)
@@ -338,8 +346,15 @@ class VoiceAssistant:
         else:
             print("  - Triggering Ctrl+V...")
             keys = [KEY_LEFTCTRL, KEY_V]
-        if self._press(lambda: self.keyboard.press_combo(keys)):
-            print("  - Done.")
+        if not self._press(lambda: self.keyboard.press_combo(keys)):
+            return  # keep the dictation on the clipboard for a manual paste
+        print("  - Done.")
+        if backup is not None:
+            # The app fetches the clipboard only after it sees the keystroke;
+            # restoring sooner would paste the old content instead.
+            time.sleep(CLIPBOARD_RESTORE_DELAY)
+            if clipboard_backup.restore(backup):
+                print("  - Clipboard restored.")
 
     def _press(self, action):
         """Runs a portal key action. On failure the user is told; the text is
@@ -499,6 +514,7 @@ class VoiceAssistant:
                     voice=self.reader._voice_name,
                     speed=self.reader._speed,
                     paste_with_shift=self.paste_with_shift,
+                    restore_clipboard=self.restore_clipboard,
                 ),
                 self._settings_path,
             )
@@ -737,6 +753,11 @@ class VoiceAssistant:
         paste_action.setChecked(self.paste_with_shift)
         paste_action.toggled.connect(self.set_paste_with_shift)
 
+        restore_action = self.tray_menu.addAction("Restore clipboard after pasting")
+        restore_action.setCheckable(True)
+        restore_action.setChecked(self.restore_clipboard)
+        restore_action.toggled.connect(self.set_restore_clipboard)
+
         self.tray_menu.addSeparator()
         quit_action = self.tray_menu.addAction("Close Voice Assistant")
         quit_action.triggered.connect(self.stop)
@@ -761,6 +782,11 @@ class VoiceAssistant:
     def set_paste_with_shift(self, enabled):
         self.paste_with_shift = enabled
         print(f"Paste mode: {'Ctrl+Shift+V' if enabled else 'Ctrl+V'}")
+        self._save_settings()
+
+    def set_restore_clipboard(self, enabled):
+        self.restore_clipboard = enabled
+        print(f"Restore clipboard after pasting: {'on' if enabled else 'off'}")
         self._save_settings()
 
     def refresh_mic_menu(self):

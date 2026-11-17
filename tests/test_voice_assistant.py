@@ -95,6 +95,7 @@ def test_resolve_startup_settings_defaults_when_nothing_saved(tmp_path):
     assert result.voice == voice_assistant.DEFAULT_VOICE
     assert result.speed == voice_assistant.READ_SPEED
     assert result.paste_with_shift is True
+    assert result.restore_clipboard is True
 
 
 class _FakeRecognizer:
@@ -184,6 +185,7 @@ def test_save_settings_snapshots_current_state(monkeypatch, tmp_path):
     va.preferred_input_name = "USB Microphone"
     va.preferred_output_name = "Speakers"
     va.paste_with_shift = False
+    va.restore_clipboard = False
     va.reader = _FakeReader("en_US-sarah", 1.25)
     monkeypatch.setattr(va, "get_input_devices", lambda: [{"index": 3, "name": "USB Microphone"}])
     monkeypatch.setattr(va, "get_output_devices", lambda: [{"index": 1, "name": "Speakers"}])
@@ -197,6 +199,7 @@ def test_save_settings_snapshots_current_state(monkeypatch, tmp_path):
         voice="en_US-sarah",
         speed=1.25,
         paste_with_shift=False,
+        restore_clipboard=False,
     )
 
 
@@ -207,6 +210,7 @@ def test_set_paste_with_shift_persists(monkeypatch, tmp_path):
     va.output_device = None
     va.preferred_input_name = None
     va.preferred_output_name = None
+    va.restore_clipboard = True
     va.reader = _FakeReader(voice_assistant.DEFAULT_VOICE, voice_assistant.READ_SPEED)
     monkeypatch.setattr(va, "get_input_devices", lambda: [])
     monkeypatch.setattr(va, "get_output_devices", lambda: [])
@@ -218,6 +222,23 @@ def test_set_paste_with_shift_persists(monkeypatch, tmp_path):
     assert saved.paste_with_shift is False
 
 
+def test_set_restore_clipboard_persists(monkeypatch, tmp_path):
+    va = voice_assistant.VoiceAssistant.__new__(voice_assistant.VoiceAssistant)
+    va._settings_path = tmp_path / "settings.json"
+    va.preferred_input_name = None
+    va.preferred_output_name = None
+    va.paste_with_shift = True
+    va.restore_clipboard = True
+    va.restore_clipboard = True
+    va.reader = _FakeReader(voice_assistant.DEFAULT_VOICE, voice_assistant.READ_SPEED)
+
+    va.set_restore_clipboard(False)
+
+    assert va.restore_clipboard is False
+    saved = voice_assistant.tray_settings.load(va._settings_path)
+    assert saved.restore_clipboard is False
+
+
 def test_set_speed_persists(monkeypatch, tmp_path):
     va = voice_assistant.VoiceAssistant.__new__(voice_assistant.VoiceAssistant)
     va._settings_path = tmp_path / "settings.json"
@@ -226,6 +247,7 @@ def test_set_speed_persists(monkeypatch, tmp_path):
     va.preferred_input_name = None
     va.preferred_output_name = None
     va.paste_with_shift = True
+    va.restore_clipboard = True
     va.reader = _FakeReader(voice_assistant.DEFAULT_VOICE, voice_assistant.READ_SPEED)
     monkeypatch.setattr(va, "get_input_devices", lambda: [])
     monkeypatch.setattr(va, "get_output_devices", lambda: [])
@@ -245,6 +267,7 @@ def test_on_select_voice_persists_on_success(monkeypatch, tmp_path):
     va.preferred_input_name = None
     va.preferred_output_name = None
     va.paste_with_shift = True
+    va.restore_clipboard = True
     va.reader = _FakeReader(voice_assistant.DEFAULT_VOICE, voice_assistant.READ_SPEED)
     monkeypatch.setattr(va, "get_input_devices", lambda: [])
     monkeypatch.setattr(va, "get_output_devices", lambda: [])
@@ -497,6 +520,7 @@ def _persisting_assistant(monkeypatch, tmp_path, in_devices, out_devices=()):
     va = _bare_assistant(monkeypatch, in_devices)
     va._settings_path = tmp_path / "settings.json"
     va.paste_with_shift = True
+    va.restore_clipboard = True
     va.reader = _FakeReader(voice_assistant.DEFAULT_VOICE, voice_assistant.READ_SPEED)
     va.reader.stop = lambda: None
     va.reader.set_output_device = lambda idx: None
@@ -553,6 +577,7 @@ def test_set_output_device_resolves_by_name(monkeypatch, tmp_path):
     va.preferred_input_name = None
     va.preferred_output_name = None
     va.paste_with_shift = True
+    va.restore_clipboard = True
     va.reader = _FakeReader(voice_assistant.DEFAULT_VOICE, voice_assistant.READ_SPEED)
     va.reader.set_output_device = lambda idx: None
     va.set_output_device("speakers")
@@ -765,6 +790,9 @@ def test_read_key_press_toggles_reading_and_release_is_ignored(monkeypatch):
     assert calls == ["read"]
 
 
+_SAVED = voice_assistant.clipboard_backup.Snapshot("text/plain", b"earlier")
+
+
 class _FakeKeyboard:
     def __init__(self, error=None):
         self.combos = []
@@ -780,13 +808,17 @@ class _FakeKeyboard:
         self.typed.append(text)
 
 
-def _injecting_assistant(monkeypatch, keyboard, wl_copy_fails=False):
+def _injecting_assistant(monkeypatch, keyboard, wl_copy_fails=False, saved=_SAVED):
     va = voice_assistant.VoiceAssistant.__new__(voice_assistant.VoiceAssistant)
     va.keyboard = keyboard
     va.paste_with_shift = True
+    va.restore_clipboard = True
     va.notifications = []
+    va.restored = []
     monkeypatch.setattr(va, "_notify", lambda t, m: va.notifications.append((t, m)))
     monkeypatch.setattr(voice_assistant.time, "sleep", lambda s: None)
+    monkeypatch.setattr(voice_assistant.clipboard_backup, "save", lambda: saved)
+    monkeypatch.setattr(voice_assistant.clipboard_backup, "restore", va.restored.append)
     copied = []
 
     def fake_run(args, check):
@@ -835,6 +867,44 @@ def test_inject_text_tells_user_when_keyboard_access_refused(monkeypatch):
 
     assert copied, "the text must still reach the clipboard"
     assert va.notifications and "clipboard" in va.notifications[0][1]
+    assert va.restored == [], "the dictation must stay on the clipboard for a manual paste"
+
+
+def test_inject_text_restores_previous_clipboard_after_paste(monkeypatch):
+    kb = _FakeKeyboard()
+    va, _ = _injecting_assistant(monkeypatch, kb)
+
+    va.inject_text("hello")
+
+    assert kb.combos and va.restored == [_SAVED]
+
+
+def test_inject_text_keeps_clipboard_alone_when_typing(monkeypatch):
+    kb = _FakeKeyboard()
+    va, _ = _injecting_assistant(monkeypatch, kb, wl_copy_fails=True)
+
+    va.inject_text("hello")
+
+    assert va.restored == []
+
+
+def test_inject_text_skips_restore_when_backup_failed(monkeypatch):
+    kb = _FakeKeyboard()
+    va, _ = _injecting_assistant(monkeypatch, kb, saved=None)
+
+    va.inject_text("hello")
+
+    assert kb.combos and va.restored == []
+
+
+def test_inject_text_leaves_dictation_on_clipboard_when_disabled(monkeypatch):
+    kb = _FakeKeyboard()
+    va, _ = _injecting_assistant(monkeypatch, kb)
+    va.restore_clipboard = False
+
+    va.inject_text("hello")
+
+    assert kb.combos and va.restored == []
 
 
 def test_recording_timeout_releases_a_stuck_recording(monkeypatch):
