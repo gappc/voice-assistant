@@ -30,6 +30,8 @@ class CorrectionDialog(QDialog):
         self.setWindowFlag(Qt.WindowStaysOnTopHint)
         self.resize(760, 560)
         self.raw, self.injected, self.path, self.history = raw, injected, path, history
+        self.saved = []            # rule specs saved in this dialog
+        self.target_edited = False  # has the user typed into "Should be"?
         try:
             self.existing = tc.load_rules(path)
             load_error = None
@@ -54,8 +56,9 @@ class CorrectionDialog(QDialog):
         form = QFormLayout()
         form.addRow("Recognized:", recognized)
         form.addRow("Should be:", self.fixed)
-        form.addRow(QLabel("<b>Rule</b> – words are matched whole, in any case; "
-                           "separate alternatives with commas"))
+        self.rule_header = QLabel()
+        self.rule_header.setWordWrap(True)
+        form.addRow(self.rule_header)
         form.addRow("Replace:", self.wrong)
         form.addRow("With:", self.right)
         form.addRow("Only if followed by:", self.followed_by)
@@ -78,7 +81,7 @@ class CorrectionDialog(QDialog):
         layout.addWidget(hint)
         layout.addWidget(self.buttons)
 
-        self.fixed.textChanged.connect(self._suggest)
+        self.fixed.textChanged.connect(self._on_target_edited)
         for field in (self.wrong, self.right, self.followed_by, self.preceded_by):
             field.textChanged.connect(self._rule_edited)
         self._suggest()
@@ -101,42 +104,87 @@ class CorrectionDialog(QDialog):
         field.setText(value)
         field.blockSignals(False)
 
+    @property
+    def current(self):
+        """The dictation as the saved rules (including this dialog's) leave it."""
+        return tc.apply(self.existing, self.raw)
+
+    def _on_target_edited(self):
+        self.target_edited = True
+        self._suggest()
+
     def _suggest(self):
-        # Derive from the injected text: existing rules already ran on it,
-        # and the new rule runs after them. Context fields are left as set.
-        suggestion = tc.suggest_rule(self.injected, self.fixed.text())
-        self._set(self.wrong, ", ".join(suggestion["replace"]) if suggestion else "")
-        self._set(self.right, suggestion["with"] if suggestion else "")
+        # One rule per separate change; the first remaining one is shown.
+        # Context fields are left as set, so narrowing survives retyping.
+        changes = tc.suggest_changes(self.current, self.fixed.text())
+        spec = changes[0].spec if changes else {"replace": [], "with": ""}
+        self._set(self.wrong, ", ".join(spec["replace"]))
+        self._set(self.right, spec["with"])
         self._evaluate()
 
     def _rule_edited(self):
-        # Rule typed by hand: "Should be" follows the rule's result.
-        try:
-            rule = tc.Rule.from_spec(self.spec())
-        except ValueError:
-            rule = None
-        if rule:
-            self._set(self.fixed, tc.apply([*self.existing, rule], self.raw))
+        # Rule typed by hand without a target sentence: "Should be" follows it.
+        if not self.target_edited:
+            try:
+                rule = tc.Rule.from_spec(self.spec())
+            except ValueError:
+                rule = None
+            if rule:
+                self._set(self.fixed, tc.apply([*self.existing, rule], self.raw))
         self._evaluate()
+
+    def _examples(self, rule):
+        """Examples for `rule`: the fragment around each place it changes,
+        or the whole dictation if a fragment alone doesn't reproduce it."""
+        rules = [*self.existing, rule]
+        result = tc.apply(rules, self.raw)
+        # Fragments are cut at the other changes towards "Should be", so this
+        # example stays valid whether or not rules for those get saved.
+        target = self.fixed.text() if self.target_edited else result
+        examples = [(c.before, c.after) for c in tc.suggest_changes(self.current, target)
+                    if tc.apply(rules, c.before) == c.after
+                    and tc.apply(self.existing, c.before) != c.after]
+        return examples or [(self.raw, result)]
+
+    def _show_step(self, remaining):
+        """Header "Rule n of m" plus the changes still to come, and a
+        "Save & Next" button while more follow."""
+        header = "<b>Rule</b>"
+        if self.saved or remaining:
+            n = len(self.saved) + 1
+            header = f"<b>Rule {n} of {n + len(remaining)}</b>"
+        header += " – words are matched whole, in any case; separate alternatives with commas"
+        if remaining:
+            todo = ", ".join(f"“{html.escape(c.spec['replace'][0])}” → “{html.escape(c.spec['with'])}”"
+                             for c in remaining)
+            header += (f"<br>Next: {todo} <i>(close the dialog to skip what "
+                       "needs no rule)</i>")
+        self.rule_header.setText(header)
+        self.buttons.button(QDialogButtonBox.Save).setText(
+            "Save && Next" if remaining else "Save")
 
     def _evaluate(self):
         save = self.buttons.button(QDialogButtonBox.Save)
         save.setEnabled(False)
+        self._show_step([])
         self.preview.setPlainText("")
         if not _split(self.wrong.text()):
-            self.status.setText("Edit “Should be” into what you said, or fill in the rule.")
+            if self.saved and self.current == self.fixed.text():
+                self.status.setText("✓ The dictation is fully corrected.")
+            else:
+                self.status.setText("Edit “Should be” into what you said, or fill in the rule.")
             return
         ev = tc.evaluate_new_rule(self.existing, self.raw, self.fixed.text(), self.spec(),
                                   self.history)
         if ev.error:
             self.status.setText(f"⚠ {ev.error}")
             return
-        if ev.result == tc.apply(self.existing, self.raw):
+        if ev.result == self.current:
             self.status.setText("This rule changes nothing in the dictation.")
             return
         lines, notes = [], []
-        if not ev.produces_fix:
-            notes.append(f"⚠ The rules turn the dictation into: “{ev.result}”")
+        if self.saved:
+            notes.append(f"✓ Saved rule {len(self.saved)}: {tc.describe(self.saved[-1])}")
         if ev.broken_examples:
             notes.append(f"⚠ Breaks {len(ev.broken_examples)} existing example(s) – narrow "
                          "the rule with “Only if followed/preceded by” to save it.")
@@ -152,9 +200,10 @@ class CorrectionDialog(QDialog):
                 lines.append(f"… and {len(ev.side_effects) - SHOWN_SIDE_EFFECTS} more")
         else:
             notes.append(f"Changes none of {len(self.history)} earlier dictations.")
+        self._show_step(tc.suggest_changes(ev.result, self.fixed.text()))
         self.status.setText("\n".join(notes))
         self.preview.setPlainText("\n".join(lines))
-        save.setEnabled(ev.produces_fix and not ev.broken_examples)
+        save.setEnabled(not ev.broken_examples)
 
     def _check_all(self):
         """Same as `text_corrections.py check`, shown in the dialog. Rereads
@@ -179,5 +228,15 @@ class CorrectionDialog(QDialog):
             self.preview.setPlainText("")
 
     def _save(self):
-        tc.append_rule(self.path, self.spec(), (self.raw, self.fixed.text()))
-        self.accept()
+        spec = self.spec()
+        rule = tc.Rule.from_spec(spec)
+        tc.append_rule(self.path, spec, self._examples(rule))
+        self.saved.append(spec)
+        self.existing = tc.load_rules(self.path)
+        if not tc.suggest_changes(self.current, self.fixed.text()):
+            self.accept()
+            return
+        # More separate changes left: suggest the next one, context cleared.
+        self._set(self.followed_by, "")
+        self._set(self.preceded_by, "")
+        self._suggest()

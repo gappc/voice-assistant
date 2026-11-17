@@ -183,18 +183,18 @@ def test_affected_lists_history_that_a_rule_would_change():
 def test_append_rule_writes_a_loadable_rule_with_its_example(tmp_path):
     path = tmp_path / "sub" / "c.toml"
     tc.append_rule(path, {"replace": ["Link"], "with": "Lynq", "followed_by": ["API"]},
-                   ("Die Link API", "Die Lynq API"))
-    tc.append_rule(path, {"replace": ["it's"], "with": 'say "x"'}, ("it's", 'say "x"'))
+                   [("Die Link API", "Die Lynq API"), ("Link API", "Lynq API")])
+    tc.append_rule(path, {"replace": ["it's"], "with": 'say "x"'}, [("it's", 'say "x"')])
     text = path.read_text()
     assert "replace = ['Link']" in text and "followed_by = ['API']" in text
     rules = tc.load_rules(path)
-    assert len(rules) == 2
+    assert len(rules) == 2 and len(rules[0].examples) == 2
     assert tc.check(rules) == []
 
 
 def test_append_rule_refuses_an_invalid_rule(tmp_path):
     with pytest.raises(ValueError):
-        tc.append_rule(tmp_path / "c.toml", {"replace": [], "with": "x"}, ("a", "b"))
+        tc.append_rule(tmp_path / "c.toml", {"replace": [], "with": "x"}, [("a", "b")])
     assert not (tmp_path / "c.toml").exists()
 
 
@@ -253,3 +253,41 @@ def test_cli_add_appends_and_checks(tmp_path, monkeypatch, capsys):
 ])
 def test_suggest_rule_grows_to_whole_words_but_not_edge_punctuation(raw, fixed, old, new):
     assert tc.suggest_rule(raw, fixed) == {"replace": [old], "with": new}
+
+
+# --- Separate changes -------------------------------------------------------
+
+def test_separate_changes_become_separate_rules_with_independent_examples():
+    raw = "Ja, bitte komm mitten und den Main mergen und pushen."
+    fixed = "Ja, bitte committen und in Main mergen und pushen."
+    first, second = tc.suggest_changes(raw, fixed)
+    assert first == tc.Change({"replace": ["komm mitten"], "with": "committen"},
+                              "Ja, bitte komm mitten und", "Ja, bitte committen und")
+    assert second == tc.Change({"replace": ["den"], "with": "in"},
+                               "und den Main mergen und pushen.", "und in Main mergen und pushen.")
+    # Either rule's example holds whether or not the other rule exists.
+    r1, r2 = (tc.Rule.from_spec(c.spec, [(c.before, c.after)]) for c in (first, second))
+    assert tc.check([r1]) == [] and tc.check([r2]) == [] and tc.check([r1, r2]) == []
+    assert tc.apply([r1, r2], raw) == fixed
+
+
+@pytest.mark.parametrize("raw, fixed", [
+    ("x a b", "a b"), ("a b x", "a b"), ("a x b", "a b"),       # deletions
+    ("a b", "a b c"), ("b c", "a b c"),                          # insertions
+])
+def test_deletions_and_insertions_anchor_on_a_neighbouring_word(raw, fixed):
+    [change] = tc.suggest_changes(raw, fixed)
+    rule = tc.Rule.from_spec(change.spec)
+    assert tc.apply([rule], raw) == fixed
+    assert tc.apply([rule], change.before) == change.after
+
+
+def test_cli_add_creates_one_rule_per_separate_change(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(tc, "load_history", lambda: [])
+    path = tmp_path / "c.toml"
+    assert tc.main(["--file", str(path), "add", "bitte komm mitten und den Main mergen",
+                    "bitte committen und in Main mergen"]) == 0
+    rules = tc.load_rules(path)
+    assert len(rules) == 2 and tc.check(rules) == []
+    out = capsys.readouterr().out
+    assert "komm mitten -> committen" in out and "den -> in" in out

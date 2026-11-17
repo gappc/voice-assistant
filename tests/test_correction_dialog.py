@@ -92,3 +92,61 @@ def test_check_button_verifies_the_rules_file(app, tmp_path):
     path.write_text("[[rule]]\nwith = 'x'\n")
     dlg.check_button.click()
     assert "invalid" in dlg.status.text()
+
+
+def test_separate_changes_are_saved_one_rule_at_a_time(app, tmp_path):
+    path = tmp_path / "c.toml"
+    raw = "Ja, bitte komm mitten und den Main mergen und pushen."
+    history = ["Er soll den Main mergen.", "Wir komm mitten rein."]
+    dlg = CorrectionDialog(raw, raw, path, history)
+    dlg.fixed.setText("Ja, bitte committen und in Main mergen und pushen.")
+
+    assert (dlg.wrong.text(), dlg.right.text()) == ("komm mitten", "committen")
+    assert "Rule 1 of 2" in dlg.rule_header.text()
+    assert "Next: “den” → “in”" in dlg.rule_header.text()
+    assert save_button(dlg).text() == "Save && Next"
+    save_button(dlg).click()
+    assert "Rule 2 of 2" in dlg.rule_header.text() and "Next:" not in dlg.rule_header.text()
+    assert save_button(dlg).text() == "Save"
+
+    # Dialog stays open with the next change; its side effects are visible.
+    assert dlg.result() == 0
+    assert (dlg.wrong.text(), dlg.right.text()) == ("den", "in")
+    assert "✓ Saved rule 1: komm mitten -> committen" in dlg.status.text()
+    assert "+ Er soll in Main mergen." in dlg.preview.toPlainText()
+    dlg.reject()  # "den" -> "in" was a one-off: no rule
+
+    rules = tc.load_rules(path)
+    assert len(rules) == 1 and tc.check(rules) == []
+    assert rules[0].examples == (("Ja, bitte komm mitten und", "Ja, bitte committen und"),)
+    assert dlg.saved == [{"replace": ["komm mitten"], "with": "committen"}]
+
+
+def test_saving_the_last_change_closes_the_dialog(app, tmp_path):
+    path = tmp_path / "c.toml"
+    raw = "bitte komm mitten und den Main mergen"
+    dlg = CorrectionDialog(raw, raw, path, [])
+    dlg.fixed.setText("bitte committen und in Main mergen")
+    save_button(dlg).click()
+    dlg.followed_by.setText("Main")
+    save_button(dlg).click()
+    assert dlg.result() == 1
+    rules = tc.load_rules(path)
+    assert len(rules) == 2 and tc.check(rules) == []
+    assert tc.apply(rules, raw) == "bitte committen und in Main mergen"
+    assert tc.apply(rules, "den Hund") == "den Hund"
+
+
+def test_tuning_a_suggested_rule_keeps_the_target_sentence(app, tmp_path):
+    raw = "die Link Doku"
+    dlg = CorrectionDialog(raw, raw, tmp_path / "c.toml", [])
+    dlg.fixed.setText("die Lynq Doku")
+    dlg.wrong.setText("Link, Lync")
+    assert dlg.fixed.text() == "die Lynq Doku"
+
+
+def test_single_change_shows_no_step_counter(app, tmp_path):
+    dlg = CorrectionDialog("die Link Doku", "die Link Doku", tmp_path / "c.toml", [])
+    dlg.fixed.setText("die Lynq Doku")
+    assert "of" not in dlg.rule_header.text()
+    assert save_button(dlg).text() == "Save"

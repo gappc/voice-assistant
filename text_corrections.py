@@ -196,36 +196,93 @@ class Corrector:
 _TOKEN = re.compile(r"\w+|[^\w\s]")
 
 
+@dataclass(frozen=True)
+class Change:
+    """One suggested rule and its example: the sentence fragment around the
+    change, cut short of any other change so the examples of separately saved
+    rules don't depend on each other."""
+    spec: dict
+    before: str
+    after: str
+
+
+def _token_spans(text):
+    return [(m.start(), m.end()) for m in _TOKEN.finditer(text)]
+
+
+def suggest_changes(text, fixed):
+    """One Change per place where `fixed` differs from `text`, in order.
+    Unchanged words between two edits separate them ("komm mitten und den"
+    -> "committen und in" gives two rules, not one)."""
+    a, b = _token_spans(text), _token_spans(fixed)
+    if not a:
+        return []
+    opcodes = difflib.SequenceMatcher(
+        None, [text[s:e] for s, e in a], [fixed[s:e] for s, e in b], autojunk=False,
+    ).get_opcodes()
+    groups, current = [], None
+    for tag, i1, i2, j1, j2 in opcodes:
+        if tag == "equal":
+            current = None
+        elif current is None:
+            current = [i1, i2, j1, j2]
+            groups.append(current)
+        else:
+            current[1], current[3] = i2, j2
+
+    spans = []
+    for i1, i2, j1, j2 in groups:
+        if i1 == i2:  # pure insertion: anchor on a neighbouring word
+            if i1 > 0:
+                i1, j1 = i1 - 1, j1 - 1
+            else:
+                i2, j2 = i2 + 1, j2 + 1
+        elif j1 == j2:  # pure deletion: likewise, so no double space is left
+            if i2 < len(a):
+                i2, j2 = i2 + 1, j2 + 1
+            else:
+                i1, j1 = i1 - 1, j1 - 1
+        # Grow to whole space-separated words ("Link" in "Link.ing" ->
+        # "Link.ing"), then drop punctuation at the edges ("Link." -> "Link").
+        first, last = i1, i2
+        while i1 > 0 and j1 > 0 and a[i1 - 1][1] == a[i1][0] and b[j1 - 1][1] == b[j1][0]:
+            i1, j1 = i1 - 1, j1 - 1
+        while (i2 < len(a) and j2 < len(b)
+               and a[i2 - 1][1] == a[i2][0] and b[j2 - 1][1] == b[j2][0]):
+            i2, j2 = i2 + 1, j2 + 1
+        punct = lambda span: not re.match(r"\w", text[span[0]:span[1]])
+        while i1 < first and punct(a[i1]):
+            i1, j1 = i1 + 1, j1 + 1
+        while i2 > last and punct(a[i2 - 1]):
+            i2, j2 = i2 - 1, j2 - 1
+        if spans and i1 < spans[-1][1]:  # grew into the previous change: merge
+            p = spans.pop()
+            i1, j1 = p[0], p[2]
+        spans.append((i1, i2, j1, j2))
+
+    def start(tokens, index):  # where the text after the previous change begins
+        return tokens[index][0] if index < len(tokens) else None
+
+    def end(tokens, index):  # where the text before the next change ends
+        return tokens[index - 1][1] if index > 0 else 0
+
+    changes = []
+    for k, (i1, i2, j1, j2) in enumerate(spans):
+        prev = spans[k - 1] if k > 0 else None
+        nxt = spans[k + 1] if k + 1 < len(spans) else None
+        before = text[start(a, prev[1]) if prev else 0:end(a, nxt[0]) if nxt else len(text)]
+        after = fixed[(start(b, prev[3]) or len(fixed)) if prev else 0:
+                      end(b, nxt[2]) if nxt else len(fixed)]
+        old = text[a[i1][0]:a[i2 - 1][1]]
+        new = fixed[b[j1][0]:b[j2 - 1][1]] if j2 > j1 else ""
+        changes.append(Change({"replace": [old], "with": new}, before.strip(), after.strip()))
+    return changes
+
+
 def suggest_rule(raw, fixed):
-    """Rule table turning the changed words of `raw` into `fixed`, or None if
-    nothing changed. Changes spread over a sentence become one rule for the
-    span from the first to the last change."""
-    a = [(m.start(), m.end()) for m in _TOKEN.finditer(raw)]
-    b = [(m.start(), m.end()) for m in _TOKEN.finditer(fixed)]
-    ops = [op for op in difflib.SequenceMatcher(
-        None, [raw[s:e] for s, e in a], [fixed[s:e] for s, e in b], autojunk=False,
-    ).get_opcodes() if op[0] != "equal"]
-    if not ops:
-        return None
-    i1, i2, j1, j2 = ops[0][1], ops[-1][2], ops[0][3], ops[-1][4]
-    if i1 == i2:  # pure insertion: anchor on the word before it
-        i1, j1 = max(i1 - 1, 0), max(j1 - 1, 0)
-        i2, j2 = max(i2, i1 + 1), max(j2, j1 + 1)
-    # Grow to whole space-separated words ("Link" in "Link.ing" -> "Link.ing"),
-    # then drop punctuation at the edges ("Link." -> "Link").
-    first, last = i1, i2
-    while (i1 > 0 and j1 > 0 and a[i1 - 1][1] == a[i1][0] and b[j1 - 1][1] == b[j1][0]):
-        i1, j1 = i1 - 1, j1 - 1
-    while (i2 < len(a) and j2 < len(b) and a[i2 - 1][1] == a[i2][0] and b[j2 - 1][1] == b[j2][0]):
-        i2, j2 = i2 + 1, j2 + 1
-    punct = lambda span: not re.match(r"\w", raw[span[0]:span[1]])
-    while i1 < first and punct(a[i1]):
-        i1, j1 = i1 + 1, j1 + 1
-    while i2 > last and punct(a[i2 - 1]):
-        i2, j2 = i2 - 1, j2 - 1
-    old =raw[a[i1][0]:a[i2 - 1][1]]
-    new = fixed[b[j1][0]:b[j2 - 1][1]] if j2 > j1 else ""
-    return {"replace": [old], "with": new}
+    """Rule table for the first change from `raw` to `fixed`, or None."""
+    changes = suggest_changes(raw, fixed)
+    return changes[0].spec if changes else None
 
 
 def describe(spec):
@@ -272,8 +329,8 @@ def _toml_list(items):
     return "[" + ", ".join(_toml_str(i) for i in items) + "]"
 
 
-def append_rule(path, spec, example):
-    """Append rule table `spec` with `example` (input, expected) to `path`."""
+def append_rule(path, spec, examples):
+    """Append rule table `spec` with `examples` [(input, expected), ...] to `path`."""
     Rule.from_spec(spec)  # refuse to write a rule that wouldn't load
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -284,7 +341,7 @@ def append_rule(path, spec, example):
             lines.append(f"{key} = {_toml_list(value)}")
         elif isinstance(value, str) and (value or key == "with"):
             lines.append(f"{key} = {_toml_str(value)}")
-    lines.append(f"examples = [{_toml_list(example)}]")
+    lines.append("examples = [" + ", ".join(_toml_list(ex) for ex in examples) + "]")
     with open(path, "a", encoding="utf-8") as f:
         f.write("\n".join(lines) + "\n")
 
@@ -371,17 +428,19 @@ def main(argv=None):
                 print(f"  {text}" if out == text else f"- {text}\n+ {out}")
         return 0
 
-    # add
-    spec = suggest_rule(args.wrong, args.right)
-    if spec is None:
+    # add: one rule per separate change, each with its own fragment as example
+    changes = suggest_changes(apply(rules, args.wrong), args.right)
+    if not changes:
         print("nothing changed")
         return 1
-    append_rule(args.file, spec, (args.wrong, args.right))
-    print(f"added: {describe(spec)}")
-    changes = affected([Rule.from_spec(spec)], load_history())
-    if changes:
-        print(f"this rule alone would change {len(changes)} past dictations:")
-        _show_affected(changes)
+    history = load_history()
+    for change in changes:
+        append_rule(args.file, change.spec, [(change.before, change.after)])
+        print(f"added: {describe(change.spec)}")
+        side = affected([Rule.from_spec(change.spec)], history)
+        if side:
+            print(f"  this rule alone would change {len(side)} past dictations:")
+            _show_affected(side)
     failures = check(load_rules(args.file))
     for src, want, got in failures:
         print(f"FAIL  {src}\n  want {want}\n  got  {got}")

@@ -811,8 +811,11 @@ class VoiceAssistant:
         dialog.show()
         dialog.raise_()
         dialog.activateWindow()
-        if dialog.exec():
-            self._notify("Fix Last Dictation", "Rule added; it applies from the next dictation.")
+        dialog.exec()
+        if dialog.saved:
+            n = len(dialog.saved)
+            self._notify("Fix Last Dictation",
+                         f"{n} rule{'s' if n > 1 else ''} added; applies from the next dictation.")
 
     def set_paste_with_shift(self, enabled):
         self.paste_with_shift = enabled
