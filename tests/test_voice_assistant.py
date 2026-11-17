@@ -790,121 +790,81 @@ def test_read_key_press_toggles_reading_and_release_is_ignored(monkeypatch):
     assert calls == ["read"]
 
 
-_SAVED = voice_assistant.clipboard_backup.Snapshot("text/plain", b"earlier")
-
-
 class _FakeKeyboard:
     def __init__(self, error=None):
-        self.combos = []
-        self.typed = []
+        self.pastes = []
         self.error = error
 
-    def press_combo(self, keys):
+    def paste(self, text, keys, restore):
         if self.error:
             raise self.error
-        self.combos.append(keys)
-
-    def type_text(self, text):
-        self.typed.append(text)
+        self.pastes.append((text, keys, restore))
 
 
-def _injecting_assistant(monkeypatch, keyboard, wl_copy_fails=False, saved=_SAVED):
+def _injecting_assistant(monkeypatch, keyboard):
     va = voice_assistant.VoiceAssistant.__new__(voice_assistant.VoiceAssistant)
     va.keyboard = keyboard
     va.paste_with_shift = True
     va.restore_clipboard = True
     va.notifications = []
-    va.restored = []
     monkeypatch.setattr(va, "_notify", lambda t, m: va.notifications.append((t, m)))
-    monkeypatch.setattr(voice_assistant.time, "sleep", lambda s: None)
-    monkeypatch.setattr(voice_assistant.clipboard_backup, "save", lambda: saved)
-    monkeypatch.setattr(voice_assistant.clipboard_backup, "restore", va.restored.append)
-    copied = []
-
-    def fake_run(args, check):
-        if wl_copy_fails:
-            raise voice_assistant.subprocess.CalledProcessError(1, args)
-        copied.append(args)
-    monkeypatch.setattr(voice_assistant.subprocess, "run", fake_run)
-    return va, copied
+    return va
 
 
-def test_inject_text_copies_then_pastes_with_ctrl_shift_v(monkeypatch):
+def test_inject_text_pastes_with_ctrl_shift_v_and_restores(monkeypatch):
     kb = _FakeKeyboard()
-    va, copied = _injecting_assistant(monkeypatch, kb)
+    va = _injecting_assistant(monkeypatch, kb)
 
     va.inject_text("Grüße")
 
-    assert copied == [["wl-copy", "Grüße"]]
-    assert kb.combos == [[29, 42, 47]]
+    assert kb.pastes == [("Grüße", [29, 42, 47], True)]
 
 
 def test_inject_text_plain_ctrl_v_when_shift_disabled(monkeypatch):
     kb = _FakeKeyboard()
-    va, _ = _injecting_assistant(monkeypatch, kb)
+    va = _injecting_assistant(monkeypatch, kb)
     va.paste_with_shift = False
 
     va.inject_text("hello")
 
-    assert kb.combos == [[29, 47]]
+    assert kb.pastes[0][1] == [29, 47]
 
 
-def test_inject_text_types_when_clipboard_fails(monkeypatch):
+def test_inject_text_passes_restore_setting(monkeypatch):
     kb = _FakeKeyboard()
-    va, _ = _injecting_assistant(monkeypatch, kb, wl_copy_fails=True)
-
-    va.inject_text("hello")
-
-    assert kb.typed == ["hello"]
-    assert kb.combos == []
-
-
-def test_inject_text_tells_user_when_keyboard_access_refused(monkeypatch):
-    kb = _FakeKeyboard(error=voice_assistant.PortalError("no", cancelled=True))
-    va, copied = _injecting_assistant(monkeypatch, kb)
-
-    va.inject_text("hello")
-
-    assert copied, "the text must still reach the clipboard"
-    assert va.notifications and "clipboard" in va.notifications[0][1]
-    assert va.restored == [], "the dictation must stay on the clipboard for a manual paste"
-
-
-def test_inject_text_restores_previous_clipboard_after_paste(monkeypatch):
-    kb = _FakeKeyboard()
-    va, _ = _injecting_assistant(monkeypatch, kb)
-
-    va.inject_text("hello")
-
-    assert kb.combos and va.restored == [_SAVED]
-
-
-def test_inject_text_keeps_clipboard_alone_when_typing(monkeypatch):
-    kb = _FakeKeyboard()
-    va, _ = _injecting_assistant(monkeypatch, kb, wl_copy_fails=True)
-
-    va.inject_text("hello")
-
-    assert va.restored == []
-
-
-def test_inject_text_skips_restore_when_backup_failed(monkeypatch):
-    kb = _FakeKeyboard()
-    va, _ = _injecting_assistant(monkeypatch, kb, saved=None)
-
-    va.inject_text("hello")
-
-    assert kb.combos and va.restored == []
-
-
-def test_inject_text_leaves_dictation_on_clipboard_when_disabled(monkeypatch):
-    kb = _FakeKeyboard()
-    va, _ = _injecting_assistant(monkeypatch, kb)
+    va = _injecting_assistant(monkeypatch, kb)
     va.restore_clipboard = False
 
     va.inject_text("hello")
 
-    assert kb.combos and va.restored == []
+    assert kb.pastes[0][2] is False
+
+
+def test_inject_text_ignores_empty_text(monkeypatch):
+    kb = _FakeKeyboard()
+    va = _injecting_assistant(monkeypatch, kb)
+
+    va.inject_text("")
+
+    assert kb.pastes == []
+
+
+def test_inject_text_tells_user_when_portal_access_refused(monkeypatch):
+    kb = _FakeKeyboard(error=voice_assistant.PortalError("no", cancelled=True))
+    va = _injecting_assistant(monkeypatch, kb)
+
+    va.inject_text("hello")
+
+    assert va.notifications and "not granted" in va.notifications[0][1]
+
+
+def test_inject_text_tells_user_when_paste_fails(monkeypatch):
+    kb = _FakeKeyboard(error=OSError("bus gone"))
+    va = _injecting_assistant(monkeypatch, kb)
+
+    va.inject_text("hello")
+
+    assert va.notifications and "bus gone" in va.notifications[0][1]
 
 
 def test_recording_timeout_releases_a_stuck_recording(monkeypatch):

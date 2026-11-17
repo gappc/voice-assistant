@@ -1,7 +1,6 @@
 import os
 import sys
 import time
-import subprocess
 import threading
 import queue
 import signal
@@ -17,7 +16,6 @@ from PySide6.QtWidgets import QApplication, QSystemTrayIcon, QMenu
 from PySide6.QtGui import QIcon, QAction, QCursor, QPixmap, QPainter, QColor, QBrush, QActionGroup
 from PySide6.QtCore import QTimer, Qt, Signal, QObject
 
-import clipboard_backup
 import text_corrections
 import tray_settings
 from speech_reader import SpeechReader, VOICE_CATALOG, DEFAULT_VOICE
@@ -33,9 +31,6 @@ SAMPLERATE = 16000
 # Copilot key). The app itself never sees a keystroke.
 HOTKEY_SOCKET = os.environ.get("VOICE_HOTKEY_SOCKET", "/run/voice-hotkey.sock")
 HOTKEY_RETRY_SECONDS = 2.0
-# Wait after Ctrl+V before putting the previous clipboard back. Apps read the
-# clipboard asynchronously; too short and they paste the old content.
-CLIPBOARD_RESTORE_DELAY = 0.5
 # Linux keycodes for the paste shortcut, sent through the RemoteDesktop portal.
 KEY_LEFTCTRL, KEY_LEFTSHIFT, KEY_V = 29, 42, 47
 READ_SPEED = 1.0  # playback speed multiplier (1.0 = normal; >1 faster, <1 slower)
@@ -338,54 +333,30 @@ class VoiceAssistant:
         return corrected
 
     def inject_text(self, text):
+        """Paste `text` through the portal: clipboard, paste shortcut and the
+        restore of the previous clipboard all happen in one portal session."""
         if not text:
             return
 
         print(f"Injecting: {text}")
-        backup = clipboard_backup.save() if self.restore_clipboard else None
-        try:
-            print("  - Copying to clipboard...")
-            subprocess.run(["wl-copy", text], check=True)
-        except (subprocess.CalledProcessError, OSError) as e:
-            print(f"Clipboard copy failed, typing instead: {e}")
-            self._press(lambda: self.keyboard.type_text(text))
-            return
-
-        # Small delay to ensure the OS has registered the clipboard change
-        time.sleep(0.1)
         if self.paste_with_shift:
-            print("  - Triggering Ctrl+Shift+V...")
             keys = [KEY_LEFTCTRL, KEY_LEFTSHIFT, KEY_V]
         else:
-            print("  - Triggering Ctrl+V...")
             keys = [KEY_LEFTCTRL, KEY_V]
-        if not self._press(lambda: self.keyboard.press_combo(keys)):
-            return  # keep the dictation on the clipboard for a manual paste
-        print("  - Done.")
-        if backup is not None:
-            # The app fetches the clipboard only after it sees the keystroke;
-            # restoring sooner would paste the old content instead.
-            time.sleep(CLIPBOARD_RESTORE_DELAY)
-            if clipboard_backup.restore(backup):
-                print("  - Clipboard restored.")
-
-    def _press(self, action):
-        """Runs a portal key action. On failure the user is told; the text is
-        still on the clipboard when the paste was what failed."""
         try:
-            action()
-            return True
+            self.keyboard.paste(text, keys, restore=self.restore_clipboard)
+            print("  - Done.")
         except PortalError as e:
-            print(f"Key injection refused: {e}", file=sys.stderr)
+            print(f"Paste refused: {e}", file=sys.stderr)
             self._notify(
                 "Could not paste",
-                "Keyboard access was not granted. The text is on the "
-                "clipboard; paste it with Ctrl+V.",
+                "Keyboard and clipboard access was not granted. Delete "
+                "~/.config/voice-assistant/portal_restore_token and restart "
+                "to be asked again.",
             )
         except Exception as e:
-            print(f"Key injection failed: {e}", file=sys.stderr)
+            print(f"Paste failed: {e}", file=sys.stderr)
             self._notify("Could not paste", f"{e}. The text may be on the clipboard.")
-        return False
 
     def get_input_devices(self):
         """Returns a list of available input devices."""
