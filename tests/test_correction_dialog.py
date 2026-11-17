@@ -74,3 +74,21 @@ def test_rule_that_breaks_an_existing_example_cannot_be_saved(app, tmp_path):
     assert not save_button(dlg).isEnabled()
     dlg.followed_by.setText("Doku")
     assert save_button(dlg).isEnabled()
+
+
+def test_check_button_verifies_the_rules_file(app, tmp_path):
+    path = tmp_path / "c.toml"
+    path.write_text("[[rule]]\nreplace = ['Lync']\nwith = 'Lynq'\n"
+                    "examples = [['Lync', 'Lynq']]\nkeep = ['Link']\n")
+    dlg = CorrectionDialog("a", "a", path, [])
+    dlg.check_button.click()
+    assert "1 rule" in dlg.status.text() and "all 2 examples pass" in dlg.status.text()
+
+    path.write_text("[[rule]]\nreplace = ['Lync']\nwith = 'Lynq'\nexamples = [['Lync', 'falsch']]\n")
+    dlg.check_button.click()
+    assert "1 of 1 examples fail" in dlg.status.text()
+    assert "want falsch" in dlg.preview.toPlainText()
+
+    path.write_text("[[rule]]\nwith = 'x'\n")
+    dlg.check_button.click()
+    assert "invalid" in dlg.status.text()

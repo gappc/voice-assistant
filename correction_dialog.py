@@ -64,9 +64,11 @@ class CorrectionDialog(QDialog):
         self.buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
         self.buttons.accepted.connect(self._save)
         self.buttons.rejected.connect(self.reject)
+        self.check_button = self.buttons.addButton("Check All Rules", QDialogButtonBox.ActionRole)
+        self.check_button.setToolTip("Verify every example in the rules file against all rules")
+        self.check_button.clicked.connect(self._check_all)
 
-        hint = QLabel(f"Rules file: {html.escape(str(path))} – "
-                      "<code>uv run text_corrections.py check</code> verifies it.")
+        hint = QLabel(f"Rules file: {html.escape(str(path))}")
         hint.setWordWrap(True)
 
         layout = QVBoxLayout(self)
@@ -153,6 +155,28 @@ class CorrectionDialog(QDialog):
         self.status.setText("\n".join(notes))
         self.preview.setPlainText("\n".join(lines))
         save.setEnabled(ev.produces_fix and not ev.broken_examples)
+
+    def _check_all(self):
+        """Same as `text_corrections.py check`, shown in the dialog. Rereads
+        the file, so it also covers edits made in an editor meanwhile."""
+        try:
+            rules = tc.load_rules(self.path)
+        except ValueError as exc:
+            self.status.setText(f"⚠ Rules file is invalid: {exc}")
+            self.preview.setPlainText("")
+            return
+        failures = tc.check(rules)
+        total = sum(len(r.examples) for r in rules)
+        counts = f"{len(rules)} rule{'s' if len(rules) != 1 else ''}"
+        if failures:
+            self.status.setText(f"⚠ Rules file: {counts}, {len(failures)} of {total} examples fail.")
+            lines = []
+            for src, want, got in failures:
+                lines += [f"FAIL  {src}", f"   want {want}", f"   got  {got}", ""]
+            self.preview.setPlainText("\n".join(lines))
+        else:
+            self.status.setText(f"✓ Rules file: {counts}, all {total} examples pass.")
+            self.preview.setPlainText("")
 
     def _save(self):
         tc.append_rule(self.path, self.spec(), (self.raw, self.fixed.text()))
