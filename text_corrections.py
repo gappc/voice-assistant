@@ -3,10 +3,15 @@
 Rules live in a TOML file (default ~/.config/voice-assistant/corrections.toml):
 
     [[rule]]
-    match = '(?<!\\w)Link(?= (API|Projekt|Webseite)\\b)'   # Python regex, case-insensitive
-    replace = 'Lynq'                                      # re.sub template (\\1 etc. allowed)
+    replace = ["Link", "linken"]          # misrecognized variants (whole words, any case)
+    with = "Lynq"                         # what they should be
+    followed_by = ["API", "Projekt"]      # optional: only before one of these words
+    preceded_by = ["das"]                 # optional: only after one of these words
     examples = [["Die alte Link API.", "Die alte Lynq API."]]   # input -> expected
-    keep = ["Gib mir einen Link."]                          # must stay unchanged
+    keep = ["Gib mir einen Link."]                              # must stay unchanged
+
+For cases plain words can't express, `regex = '...'` (Python, case-insensitive)
+takes the place of `replace`, and `with` is then an re.sub template.
 
 Rules run in file order on every dictation. `examples` and `keep` are checked
 against *all* rules, so a new rule that breaks an older example shows up in
@@ -39,12 +44,72 @@ def default_path():
 @dataclass(frozen=True)
 class Rule:
     pattern: re.Pattern
-    replace: str
+    replace: str  # re.sub template
     examples: tuple = field(default=())  # (input, expected) pairs
 
     @classmethod
-    def make(cls, match, replace, examples=()):
-        return cls(re.compile(match, re.IGNORECASE), replace, tuple(examples))
+    def make(cls, regex, template, examples=()):
+        rule = cls(re.compile(regex, re.IGNORECASE), template, tuple(examples))
+        rule.pattern.sub(rule.replace, "")  # validates group references
+        return rule
+
+    @classmethod
+    def from_spec(cls, spec, examples=()):
+        """Rule from a rule table (see module docstring). ValueError if invalid."""
+        try:
+            return cls.make(*compile_spec(spec), examples)
+        except re.error as exc:
+            raise ValueError(f"invalid regex: {exc}") from None
+
+
+SPEC_KEYS = ("replace", "regex", "with", "followed_by", "preceded_by")
+
+
+def _words(spec, key):
+    value = spec.get(key, [])
+    if isinstance(value, str):
+        value = [value]
+    if not (isinstance(value, list) and all(isinstance(v, str) for v in value)):
+        raise ValueError(f"'{key}' must be a list of strings")
+    return [v.strip() for v in value if v.strip()]
+
+
+def _phrase(text):
+    """Regex for `text` as whole words; any run of spaces matches any spaces."""
+    parts = text.split()
+    rx = r"\s+".join(re.escape(p) for p in parts)
+    if re.match(r"\w", parts[0]):
+        rx = r"(?<!\w)" + rx
+    if re.search(r"\w$", parts[-1]):
+        rx += r"(?!\w)"
+    return rx
+
+
+def _any(phrases):
+    return "(?:" + "|".join(_phrase(p) for p in phrases) + ")"
+
+
+def compile_spec(spec):
+    """(regex, re.sub template) for a rule table."""
+    if not isinstance(spec.get("with"), str):
+        raise ValueError("needs 'with' (the correct text)")
+    if "regex" in spec:
+        if not isinstance(spec["regex"], str) or not spec["regex"]:
+            raise ValueError("'regex' must be a non-empty string")
+        if "replace" in spec:
+            raise ValueError("use either 'replace' or 'regex', not both")
+        return spec["regex"], spec["with"]
+    variants = _words(spec, "replace")
+    if not variants:
+        raise ValueError("needs 'replace' (the misrecognized words)")
+    regex = _any(variants)
+    template = spec["with"].replace("\\", "\\\\")
+    if after := _words(spec, "followed_by"):
+        regex += r"(?=[\s-]+" + _any(after) + ")"
+    if before := _words(spec, "preceded_by"):
+        regex = r"(?P<before>" + _any(before) + r"[\s-]+)" + regex
+        template = r"\g<before>" + template
+    return regex, template
 
 
 def load_rules(path):
@@ -59,8 +124,6 @@ def load_rules(path):
     rules = []
     for n, entry in enumerate(data.get("rule", []), 1):
         where = f"{path}: rule {n}"
-        if not isinstance(entry.get("match"), str) or not isinstance(entry.get("replace"), str):
-            raise ValueError(f"{where}: needs string 'match' and 'replace'")
         examples = []
         for ex in entry.get("examples", []):
             if not (isinstance(ex, list) and len(ex) == 2 and all(isinstance(s, str) for s in ex)):
@@ -71,11 +134,9 @@ def load_rules(path):
                 raise ValueError(f"{where}: 'keep' entries must be strings")
             examples.append((keep, keep))
         try:
-            rule = Rule.make(entry["match"], entry["replace"], examples)
-            rule.pattern.sub(rule.replace, "")  # validates group references
-        except re.error as exc:
+            rules.append(Rule.from_spec(entry, examples))
+        except ValueError as exc:
             raise ValueError(f"{where}: {exc}") from None
-        rules.append(rule)
     return rules
 
 
@@ -136,9 +197,9 @@ _TOKEN = re.compile(r"\w+|[^\w\s]")
 
 
 def suggest_rule(raw, fixed):
-    """(match, replace) turning the changed words of `raw` into `fixed`, or
-    None if nothing changed. Changes spread over a sentence become one rule
-    for the span from the first to the last change."""
+    """Rule table turning the changed words of `raw` into `fixed`, or None if
+    nothing changed. Changes spread over a sentence become one rule for the
+    span from the first to the last change."""
     a = [(m.start(), m.end()) for m in _TOKEN.finditer(raw)]
     b = [(m.start(), m.end()) for m in _TOKEN.finditer(fixed)]
     ops = [op for op in difflib.SequenceMatcher(
@@ -150,37 +211,54 @@ def suggest_rule(raw, fixed):
     if i1 == i2:  # pure insertion: anchor on the word before it
         i1, j1 = max(i1 - 1, 0), max(j1 - 1, 0)
         i2, j2 = max(i2, i1 + 1), max(j2, j1 + 1)
-    old_words = [raw[s:e] for s, e in a[i1:i2]]
-    new_text = fixed[b[j1][0]:b[j2 - 1][1]] if j2 > j1 else ""
-    match = r"\s+".join(re.escape(w) for w in old_words)
-    if re.match(r"\w", old_words[0]):
-        match = r"(?<!\w)" + match
-    if re.search(r"\w$", old_words[-1]):
-        match += r"(?!\w)"
-    return match, new_text.replace("\\", "\\\\")
+    # Grow to whole space-separated words ("Link" in "Link.ing" -> "Link.ing"),
+    # then drop punctuation at the edges ("Link." -> "Link").
+    first, last = i1, i2
+    while (i1 > 0 and j1 > 0 and a[i1 - 1][1] == a[i1][0] and b[j1 - 1][1] == b[j1][0]):
+        i1, j1 = i1 - 1, j1 - 1
+    while (i2 < len(a) and j2 < len(b) and a[i2 - 1][1] == a[i2][0] and b[j2 - 1][1] == b[j2][0]):
+        i2, j2 = i2 + 1, j2 + 1
+    punct = lambda span: not re.match(r"\w", raw[span[0]:span[1]])
+    while i1 < first and punct(a[i1]):
+        i1, j1 = i1 + 1, j1 + 1
+    while i2 > last and punct(a[i2 - 1]):
+        i2, j2 = i2 - 1, j2 - 1
+    old =raw[a[i1][0]:a[i2 - 1][1]]
+    new = fixed[b[j1][0]:b[j2 - 1][1]] if j2 > j1 else ""
+    return {"replace": [old], "with": new}
+
+
+def describe(spec):
+    """One line for humans, e.g. 'Link, linken -> Lynq (followed by API)'."""
+    what = f"regex {spec['regex']}" if "regex" in spec else ", ".join(spec.get("replace", []))
+    text = f"{what} -> {spec.get('with', '')}"
+    if spec.get("followed_by"):
+        text += f" (followed by {', '.join(spec['followed_by'])})"
+    if spec.get("preceded_by"):
+        text += f" (preceded by {', '.join(spec['preceded_by'])})"
+    return text
 
 
 @dataclass
 class Evaluation:
-    error: str | None = None          # invalid regex/template
+    error: str | None = None          # invalid rule
     result: str = ""                  # what all rules make of the raw text
     produces_fix: bool = False        # result == the corrected sentence
     side_effects: list = field(default_factory=list)     # (before, after) in history
     broken_examples: list = field(default_factory=list)  # (input, expected, actual)
 
 
-def evaluate_new_rule(existing, raw, fixed, match, replace, history):
+def evaluate_new_rule(existing, raw, fixed, spec, history):
     """How a candidate rule, appended after `existing`, would behave."""
     try:
-        rule = Rule.make(match, replace, [(raw, fixed)])
-        rule.pattern.sub(rule.replace, "")
-    except re.error as exc:
+        rule = Rule.from_spec(spec)
+    except ValueError as exc:
         return Evaluation(error=str(exc))
     rules = [*existing, rule]
     result = apply(rules, raw)
     side_effects = [(h, out) for h in history
                     if h != raw and (out := apply(rules, h)) != apply(existing, h)]
-    broken = check([*existing, Rule.make(match, replace)])  # existing examples only
+    broken = check(rules)  # the new rule has no examples, so: existing ones it breaks
     return Evaluation(None, result, result == fixed, side_effects, broken)
 
 
@@ -190,14 +268,25 @@ def _toml_str(s):
     return json.dumps(s, ensure_ascii=False)
 
 
-def append_rule(path, match, replace, example):
+def _toml_list(items):
+    return "[" + ", ".join(_toml_str(i) for i in items) + "]"
+
+
+def append_rule(path, spec, example):
+    """Append rule table `spec` with `example` (input, expected) to `path`."""
+    Rule.from_spec(spec)  # refuse to write a rule that wouldn't load
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    src, want = example
-    block = (f"\n[[rule]]\nmatch = {_toml_str(match)}\nreplace = {_toml_str(replace)}\n"
-             f"examples = [[{_toml_str(src)}, {_toml_str(want)}]]\n")
+    lines = ["", "[[rule]]"]
+    for key in SPEC_KEYS:
+        value = spec.get(key)
+        if isinstance(value, list) and value:
+            lines.append(f"{key} = {_toml_list(value)}")
+        elif isinstance(value, str) and (value or key == "with"):
+            lines.append(f"{key} = {_toml_str(value)}")
+    lines.append(f"examples = [{_toml_list(example)}]")
     with open(path, "a", encoding="utf-8") as f:
-        f.write(block)
+        f.write("\n".join(lines) + "\n")
 
 
 # --- Past dictations ---------------------------------------------------
@@ -283,14 +372,13 @@ def main(argv=None):
         return 0
 
     # add
-    suggestion = suggest_rule(args.wrong, args.right)
-    if suggestion is None:
+    spec = suggest_rule(args.wrong, args.right)
+    if spec is None:
         print("nothing changed")
         return 1
-    match, replace = suggestion
-    append_rule(args.file, match, replace, (args.wrong, args.right))
-    print(f"added: {match}  ->  {replace}")
-    changes = affected([Rule.make(match, replace)], load_history())
+    append_rule(args.file, spec, (args.wrong, args.right))
+    print(f"added: {describe(spec)}")
+    changes = affected([Rule.from_spec(spec)], load_history())
     if changes:
         print(f"this rule alone would change {len(changes)} past dictations:")
         _show_affected(changes)

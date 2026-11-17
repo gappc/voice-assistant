@@ -4,7 +4,7 @@ import text_corrections
 
 def test_correct_dictation_applies_rules_and_remembers_raw_text(tmp_path, capsys):
     rules = tmp_path / "c.toml"
-    rules.write_text("[[rule]]\nmatch = '\\blync\\b'\nreplace = 'Lynq'\n")
+    rules.write_text("[[rule]]\nreplace = ['lync']\nwith = 'Lynq'\n")
     va = voice_assistant.VoiceAssistant.__new__(voice_assistant.VoiceAssistant)
     va.corrector = text_corrections.Corrector(rules)
     va.last_dictation = None

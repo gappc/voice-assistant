@@ -110,16 +110,23 @@ log and the previous rules stay active.
 
 ```toml
 [[rule]]
-match = '(?<!\w)Link(?=\s+(API|Projekt|Webseite)\b)'   # Python regex, case-insensitive
-replace = 'Lynq'                                      # re.sub template
+replace = ["Link", "linken"]          # misrecognized words: whole words, any case
+with = "Lynq"                         # what they should be
+followed_by = ["API", "Projekt"]      # optional: only right before one of these words
+preceded_by = ["das"]                 # optional: only right after one of these words
 examples = [["Die alte Link API.", "Die alte Lynq API."]]   # input -> expected
-keep = ["Gib mir einen Link."]                          # must stay unchanged
+keep = ["Gib mir einen Link."]                              # must stay unchanged
 ```
 
+For the rare case plain words can't express, `regex = '...'` (Python, case-insensitive)
+replaces `replace`, and `with` becomes an `re.sub` template.
+
 **Quick fix:** right after a wrong dictation, pick **Fix Last Dictation…** in the
-tray menu, correct the sentence, and save. The dialog derives a rule from your edit,
-shows which earlier dictations it would also change (from the journal) so you can
-narrow the regex, and appends it with your sentence as its example.
+tray menu. Either correct the sentence (the rule is derived from your edit) or fill
+in the rule fields (the sentence follows). The dialog shows which earlier dictations
+(from the journal) the rule would also change; add words to "Only if followed/preceded
+by" until only the right ones remain, then save. The rule is appended with your
+sentence as its example.
 
 **Command line** (`uv run text_corrections.py …`):
 
