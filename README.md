@@ -9,6 +9,7 @@ A fast, privacy-respecting, and reliable local voice-to-text assistant designed 
 - **Read Aloud (Text-to-Speech)**: Tap the **Copilot key** (right of AltGr), or on keyboards without one tap **Right Ctrl** on its own, to have your highlighted selection (or clipboard) read aloud with a natural local voice via [Kokoro-82M](https://huggingface.co/hexgrad/Kokoro-82M). Tap again to stop. Fully offline after a one-time model download.
 - **Wayland-Native Global Hotkeys without the `input` group**: A tiny root-installed system service (`hotkey_helper/voice-hotkeyd.py`) reads the keyboards and passes on only Right Alt, F23 and lone Right Ctrl taps over a Unix socket. Your user, and so every program you run, never gets to read keystrokes.
 - **Layout-Independent Text Injection**: Uses `wl-copy` and the RemoteDesktop portal (Ctrl+Shift+V by default) to paste the transcribed text. This ensures 100% accuracy for special characters and prevents mixed-up letters on non-US layouts (like Z/Y on German QWERTZ). The default Ctrl+Shift+V works in terminals as well as editors and IDEs; a tray menu toggle is provided to switch to plain Ctrl+V for apps that reserve Ctrl+Shift+V (e.g. LibreOffice "Paste Special"). Whatever was on the clipboard before is put back half a second after the paste (tray toggle "Restore clipboard after pasting"). Wayland lets `wl-copy` offer only one format, so rich text comes back as plain text; images and plain text come back unchanged.
+- **Correction Rules**: Words the recognizer keeps getting wrong (names, jargon) are fixed by your own regex rules; add one from the tray right after a wrong dictation. See [Correcting Words](#correcting-words-the-recognizer-gets-wrong).
 - **Audio Feedback**: Plays subtle beeps indicating when recording starts and stops—no need to look at a terminal or status bar.
 - **GPU Transcription**: Runs on the GPU through Vulkan (including AMD/Intel integrated graphics) via [parakeet.cpp](https://github.com/mudler/parakeet.cpp), taking ~0.1 s per phrase with almost no CPU use, and falls back to the CPU when no Vulkan device is found. Silence and key clicks produce no text.
 - **Background Service & Desktop Integration**: Includes a simple `.desktop` file for easy launching from your app menu or startup applications.
@@ -98,6 +99,39 @@ The Vulkan build picks the first GPU it finds. To force the CPU instead (about
 
 `tools/stt_bench.py` compares recognizers on your own recordings; see its docstring.
 Why Parakeet replaced Whisper, with measurements: [docs/2026-10-14-speech-recognition-parakeet.md](docs/2026-10-14-speech-recognition-parakeet.md).
+
+## Correcting Words the Recognizer Gets Wrong
+
+Names and jargon that Parakeet keeps mishearing (a project name heard as "Link",
+"merge" heard as "Merch") are fixed by rules in
+`~/.config/voice-assistant/corrections.toml`, applied to every dictation before it
+is pasted. The file is reloaded when it changes; an invalid file is reported in the
+log and the previous rules stay active.
+
+```toml
+[[rule]]
+match = '(?<!\w)Link(?=\s+(API|Projekt|Webseite)\b)'   # Python regex, case-insensitive
+replace = 'Lynq'                                      # re.sub template
+examples = [["Die alte Link API.", "Die alte Lynq API."]]   # input -> expected
+keep = ["Gib mir einen Link."]                          # must stay unchanged
+```
+
+**Quick fix:** right after a wrong dictation, pick **Fix Last Dictation…** in the
+tray menu, correct the sentence, and save. The dialog derives a rule from your edit,
+shows which earlier dictations it would also change (from the journal) so you can
+narrow the regex, and appends it with your sentence as its example.
+
+**Command line** (`uv run text_corrections.py …`):
+
+- `check`: verify every example against all rules (a new rule may break an old one)
+- `try "text"`: show what the rules make of a sentence
+- `history [regex]`: apply the rules to all past dictations, showing what would change
+- `add "wrong" "right"`: derive and append a rule, like the tray dialog
+
+Each dictation logs the raw text as `Recognized:` and the pasted text as `Injecting:`.
+
+Small local LLMs (including text-diffusion models) were tried for this and rejected:
+slower (0.5 s to 80 s per sentence) and they silently drop or swap words.
 
 ## Read Aloud
 

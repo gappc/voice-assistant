@@ -3,7 +3,7 @@ name = "voice-assistant"
 version = "0.1.0"
 description = "Local voice assistant with push-to-talk and Parakeet transcription"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 dependencies = [
     "sounddevice",
     "numpy",

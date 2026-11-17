@@ -18,6 +18,7 @@ from PySide6.QtGui import QIcon, QAction, QCursor, QPixmap, QPainter, QColor, QB
 from PySide6.QtCore import QTimer, Qt, Signal, QObject
 
 import clipboard_backup
+import text_corrections
 import tray_settings
 from speech_reader import SpeechReader, VOICE_CATALOG, DEFAULT_VOICE
 from speech_recognizer import SpeechRecognizer
@@ -170,6 +171,8 @@ class VoiceAssistant:
     def __init__(self, initial_device=None, settings_path=None):
         print("Loading speech recognizer (Parakeet v3)...")
         self.model = SpeechRecognizer()
+        self.corrector = text_corrections.Corrector()
+        self.last_dictation = None  # (raw, corrected)
         self.is_recording = False
         self.audio_data = []
         self.transcription_queue = queue.Queue()
@@ -306,7 +309,7 @@ class VoiceAssistant:
             if audio is None:
                 break
             try:
-                text = self.transcribe(audio)
+                text = self.correct_dictation(self.transcribe(audio))
                 # Small delay to ensure the OS has processed the Alt key release
                 time.sleep(0.3) 
                 self.inject_text(text)
@@ -323,6 +326,16 @@ class VoiceAssistant:
         if not text:
             print("No speech recognized.")
         return text
+
+    def correct_dictation(self, text):
+        """Apply the user's correction rules; remember raw and corrected text
+        for "Fix Last Dictation". The raw text is logged for `history`."""
+        if not text:
+            return text
+        print(f"Recognized: {text}")
+        corrected = self.corrector.correct(text)
+        self.last_dictation = (text, corrected)
+        return corrected
 
     def inject_text(self, text):
         if not text:
@@ -748,7 +761,10 @@ class VoiceAssistant:
 
         self.tray_menu.addSeparator()
 
-        paste_action = self.tray_menu.addAction("Use Ctrl+Shift+V (terminal-compatible)")
+        fix_action = self.tray_menu.addAction("Fix Last Dictation…")
+        fix_action.triggered.connect(self.on_fix_last_dictation)
+
+        paste_action =self.tray_menu.addAction("Use Ctrl+Shift+V (terminal-compatible)")
         paste_action.setCheckable(True)
         paste_action.setChecked(self.paste_with_shift)
         paste_action.toggled.connect(self.set_paste_with_shift)
@@ -778,6 +794,25 @@ class VoiceAssistant:
         
         print("Tray icon started (PySide6).")
         return self.app.exec()
+
+    def on_fix_last_dictation(self):
+        if not self.last_dictation:
+            self._notify("Fix Last Dictation", "Nothing dictated since the app started.")
+            return
+        from correction_dialog import CorrectionDialog  # Qt widgets, only when used
+
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            history = text_corrections.load_history()
+        finally:
+            QApplication.restoreOverrideCursor()
+        raw, injected = self.last_dictation
+        dialog = CorrectionDialog(raw, injected, self.corrector.path, history)
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+        if dialog.exec():
+            self._notify("Fix Last Dictation", "Rule added; it applies from the next dictation.")
 
     def set_paste_with_shift(self, enabled):
         self.paste_with_shift = enabled
