@@ -7,6 +7,7 @@ example. The logic lives in text_corrections; this module is only the UI.
 """
 
 import html
+import re
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
@@ -63,8 +64,8 @@ class CorrectionDialog(QDialog):
         layout.addWidget(self.buttons)
 
         self.fixed.textChanged.connect(self._suggest)
-        self.match.textChanged.connect(self._evaluate)
-        self.replace.textChanged.connect(self._evaluate)
+        self.match.textChanged.connect(self._rule_edited)
+        self.replace.textChanged.connect(self._rule_edited)
         self._suggest()
         if load_error:
             self.status.setText(f"⚠ Rules file is invalid, fix it first: {load_error}")
@@ -83,11 +84,25 @@ class CorrectionDialog(QDialog):
             widget.blockSignals(False)
         self._evaluate()
 
+    def _rule_edited(self):
+        # Editing the rule by hand: "Should be" follows the rule's result, so
+        # either field can drive the other.
+        try:
+            rule = tc.Rule.make(self.match.text(), self.replace.text())
+            result = tc.apply([*self.existing, rule], self.raw) if self.match.text() else None
+        except (re.error, IndexError):
+            result = None
+        if result is not None:
+            self.fixed.blockSignals(True)
+            self.fixed.setText(result)
+            self.fixed.blockSignals(False)
+        self._evaluate()
+
     def _evaluate(self):
         save = self.buttons.button(QDialogButtonBox.Save)
         self.evaluation = None
         if not self.match.text():
-            self.status.setText("Edit “Should be” into what you said.")
+            self.status.setText("Edit “Should be” into what you said, or write the rule directly.")
             self.preview.setPlainText("")
             save.setEnabled(False)
             return
@@ -99,6 +114,11 @@ class CorrectionDialog(QDialog):
             save.setEnabled(False)
             return
         lines, notes = [], []
+        if ev.result == tc.apply(self.existing, self.raw):
+            self.status.setText("This rule changes nothing in the dictation.")
+            self.preview.setPlainText("")
+            save.setEnabled(False)
+            return
         if not ev.produces_fix:
             notes.append(f"⚠ The rules turn the dictation into: “{ev.result}”")
         if ev.broken_examples:

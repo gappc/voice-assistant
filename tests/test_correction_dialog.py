@@ -42,3 +42,26 @@ def test_dialog_refuses_invalid_regex(app, tmp_path):
     dlg.match.setText("(")
     assert "Invalid regex" in dlg.status.text()
     assert not dlg.buttons.button(QDialogButtonBox.Save).isEnabled()
+
+
+def test_editing_the_rule_directly_updates_should_be_and_allows_saving(app, tmp_path):
+    path = tmp_path / "c.toml"
+    raw = "Wurde die Read Me bereits abgedatet?"
+    dlg = CorrectionDialog(raw, raw, path, ["Ich habe den Server abgedatet."])
+    save = dlg.buttons.button(QDialogButtonBox.Save)
+
+    dlg.match.setText("abgedatet")
+    dlg.replace.setText("upgedatet")
+    assert dlg.fixed.text() == "Wurde die Read Me bereits upgedatet?"
+    assert save.isEnabled()
+    save.click()
+    assert tc.apply(tc.load_rules(path), raw) == "Wurde die Read Me bereits upgedatet?"
+    assert tc.check(tc.load_rules(path)) == []
+
+
+def test_rule_that_changes_nothing_cannot_be_saved(app, tmp_path):
+    dlg = CorrectionDialog("a b", "a b", tmp_path / "c.toml", [])
+    dlg.match.setText("zzz")
+    dlg.replace.setText("y")
+    assert "changes nothing" in dlg.status.text()
+    assert not dlg.buttons.button(QDialogButtonBox.Save).isEnabled()
