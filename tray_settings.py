@@ -1,4 +1,4 @@
-"""Persisted tray settings (voice, speed, devices, paste behaviour).
+"""Persisted tray settings (voice, speed, devices, paste behaviour, beeps).
 
 Deliberately independent of speech_reader.py / voice_assistant.py: no
 VOICE_CATALOG or DEFAULT_VOICE import, so there is no circular import and this
@@ -30,6 +30,7 @@ class TraySettings:
     speed: float | None = None
     paste_with_shift: bool = True
     restore_clipboard: bool = True
+    recording_beeps: bool = True
 
 
 def load(path):
@@ -55,6 +56,7 @@ def load(path):
         speed=_float_or_default(raw.get("speed")),
         paste_with_shift=_bool_or_default(raw.get("paste_with_shift")),
         restore_clipboard=_bool_or_default(raw.get("restore_clipboard")),
+        recording_beeps=_bool_or_default(raw.get("recording_beeps")),
     )
 
 

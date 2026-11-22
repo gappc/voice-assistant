@@ -137,6 +137,7 @@ class _StartupSettings(NamedTuple):
     speed: float
     paste_with_shift: bool
     restore_clipboard: bool
+    recording_beeps: bool
 
 
 def _resolve_startup_settings(initial_device, settings_path):
@@ -154,6 +155,7 @@ def _resolve_startup_settings(initial_device, settings_path):
         speed=speed,
         paste_with_shift=settings.paste_with_shift,
         restore_clipboard=settings.restore_clipboard,
+        recording_beeps=settings.recording_beeps,
     )
 
 
@@ -201,6 +203,7 @@ class VoiceAssistant:
         # that reserve it (e.g. LibreOffice "Paste Special").
         self.paste_with_shift = startup.paste_with_shift
         self.restore_clipboard = startup.restore_clipboard
+        self.recording_beeps = startup.recording_beeps
         self.keyboard = PortalKeyboard(self._settings_path.parent / "portal_restore_token")
 
         # Setup signal handlers
@@ -250,7 +253,8 @@ class VoiceAssistant:
                 self.is_recording = True
                 self.update_ui()
                 print(f"\nRecording started (Device: {device_path})...")
-                self.play_beep(frequency=600) # High beep for start
+                if self.recording_beeps:
+                    self.play_beep(frequency=600)  # high beep for start
                 self._watchdog = _start_daemon_timer(
                     FIRST_FRAME_TIMEOUT, self._on_first_frame_timeout
                 )
@@ -277,7 +281,8 @@ class VoiceAssistant:
         self._close_input_stream()
         self.update_ui()
         print("Recording stopped. Processing...")
-        self.play_beep(frequency=400) # Lower beep for stop
+        if self.recording_beeps:
+            self.play_beep(frequency=400)  # lower beep for stop
         if self.audio_data:
             audio = np.concatenate(self.audio_data, axis=0).flatten()
             self.transcription_queue.put(audio)
@@ -499,6 +504,7 @@ class VoiceAssistant:
                     speed=self.reader._speed,
                     paste_with_shift=self.paste_with_shift,
                     restore_clipboard=self.restore_clipboard,
+                    recording_beeps=self.recording_beeps,
                 ),
                 self._settings_path,
             )
@@ -747,6 +753,11 @@ class VoiceAssistant:
         restore_action.setChecked(self.restore_clipboard)
         restore_action.toggled.connect(self.set_restore_clipboard)
 
+        beep_action = self.tray_menu.addAction("Beep when recording starts/stops")
+        beep_action.setCheckable(True)
+        beep_action.setChecked(self.recording_beeps)
+        beep_action.toggled.connect(self.set_recording_beeps)
+
         self.tray_menu.addSeparator()
         quit_action = self.tray_menu.addAction("Close Voice Assistant")
         quit_action.triggered.connect(self.stop)
@@ -812,6 +823,11 @@ class VoiceAssistant:
     def set_restore_clipboard(self, enabled):
         self.restore_clipboard = enabled
         print(f"Restore clipboard after pasting: {'on' if enabled else 'off'}")
+        self._save_settings()
+
+    def set_recording_beeps(self, enabled):
+        self.recording_beeps = enabled
+        print(f"Recording beeps: {'on' if enabled else 'off'}")
         self._save_settings()
 
     def refresh_mic_menu(self):
@@ -908,7 +924,7 @@ class VoiceAssistant:
         # Load the TTS voice (downloads on first run)
         self.reader.load()
 
-        print("Assistant ready! Hold Right Alt to record (with beeps).")
+        print("Assistant ready! Hold Right Alt to record.")
         
         threading.Thread(target=self._hotkey_loop, daemon=True).start()
         

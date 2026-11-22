@@ -96,6 +96,7 @@ def test_resolve_startup_settings_defaults_when_nothing_saved(tmp_path):
     assert result.speed == voice_assistant.READ_SPEED
     assert result.paste_with_shift is True
     assert result.restore_clipboard is True
+    assert result.recording_beeps is True
 
 
 class _FakeRecognizer:
@@ -186,6 +187,7 @@ def test_save_settings_snapshots_current_state(monkeypatch, tmp_path):
     va.preferred_output_name = "Speakers"
     va.paste_with_shift = False
     va.restore_clipboard = False
+    va.recording_beeps = False
     va.reader = _FakeReader("en_US-sarah", 1.25)
     monkeypatch.setattr(va, "get_input_devices", lambda: [{"index": 3, "name": "USB Microphone"}])
     monkeypatch.setattr(va, "get_output_devices", lambda: [{"index": 1, "name": "Speakers"}])
@@ -200,12 +202,14 @@ def test_save_settings_snapshots_current_state(monkeypatch, tmp_path):
         speed=1.25,
         paste_with_shift=False,
         restore_clipboard=False,
+        recording_beeps=False,
     )
 
 
 def test_set_paste_with_shift_persists(monkeypatch, tmp_path):
     va = voice_assistant.VoiceAssistant.__new__(voice_assistant.VoiceAssistant)
     va._settings_path = tmp_path / "settings.json"
+    va.recording_beeps = True
     va.current_device = None
     va.output_device = None
     va.preferred_input_name = None
@@ -229,7 +233,7 @@ def test_set_restore_clipboard_persists(monkeypatch, tmp_path):
     va.preferred_output_name = None
     va.paste_with_shift = True
     va.restore_clipboard = True
-    va.restore_clipboard = True
+    va.recording_beeps = True
     va.reader = _FakeReader(voice_assistant.DEFAULT_VOICE, voice_assistant.READ_SPEED)
 
     va.set_restore_clipboard(False)
@@ -239,9 +243,27 @@ def test_set_restore_clipboard_persists(monkeypatch, tmp_path):
     assert saved.restore_clipboard is False
 
 
+def test_set_recording_beeps_persists(tmp_path):
+    va = voice_assistant.VoiceAssistant.__new__(voice_assistant.VoiceAssistant)
+    va._settings_path = tmp_path / "settings.json"
+    va.preferred_input_name = None
+    va.preferred_output_name = None
+    va.paste_with_shift = True
+    va.restore_clipboard = True
+    va.recording_beeps = True
+    va.reader = _FakeReader(voice_assistant.DEFAULT_VOICE, voice_assistant.READ_SPEED)
+
+    va.set_recording_beeps(False)
+
+    assert va.recording_beeps is False
+    saved = voice_assistant.tray_settings.load(va._settings_path)
+    assert saved.recording_beeps is False
+
+
 def test_set_speed_persists(monkeypatch, tmp_path):
     va = voice_assistant.VoiceAssistant.__new__(voice_assistant.VoiceAssistant)
     va._settings_path = tmp_path / "settings.json"
+    va.recording_beeps = True
     va.current_device = None
     va.output_device = None
     va.preferred_input_name = None
@@ -262,6 +284,7 @@ def test_set_speed_persists(monkeypatch, tmp_path):
 def test_on_select_voice_persists_on_success(monkeypatch, tmp_path):
     va = voice_assistant.VoiceAssistant.__new__(voice_assistant.VoiceAssistant)
     va._settings_path = tmp_path / "settings.json"
+    va.recording_beeps = True
     va.current_device = None
     va.output_device = None
     va.preferred_input_name = None
@@ -373,6 +396,7 @@ def _bare_assistant(monkeypatch, devices):
     va._first_frame = voice_assistant.threading.Event()
     va._watchdog = None
     va._max_duration = None
+    va.recording_beeps = True
     monkeypatch.setattr(va, "get_input_devices", lambda: devices)
     monkeypatch.setattr(va, "_notify", lambda title, msg: va.notifications.append((title, msg)))
     monkeypatch.setattr(va, "update_ui", lambda: None)
@@ -422,6 +446,28 @@ def test_start_recording_opens_stream_and_stop_closes_it(monkeypatch):
     va.stop_recording("/dev/input/event0")
     assert stream.closed
     assert va.stream is None
+
+
+def _record_once_and_collect_beeps(monkeypatch, recording_beeps):
+    devices = [{"index": 17, "name": "alsa_input.usb-046d_Logitech_BRIO.analog-stereo"}]
+    va = _bare_assistant(monkeypatch, devices)
+    va.current_device = 17
+    va.transcription_queue = voice_assistant.queue.Queue()
+    va.recording_beeps = recording_beeps
+    beeps = []
+    monkeypatch.setattr(va, "play_beep", lambda **kw: beeps.append(kw["frequency"]))
+
+    va.start_recording("/dev/input/event0")
+    va.stop_recording("/dev/input/event0")
+    return beeps
+
+
+def test_recording_beeps_on_start_and_stop(monkeypatch):
+    assert _record_once_and_collect_beeps(monkeypatch, True) == [600, 400]
+
+
+def test_recording_beeps_can_be_switched_off(monkeypatch):
+    assert _record_once_and_collect_beeps(monkeypatch, False) == []
 
 
 def test_record_callback_marks_first_frame_seen(monkeypatch):
@@ -573,6 +619,7 @@ def test_set_output_device_resolves_by_name(monkeypatch, tmp_path):
 
     va = voice_assistant.VoiceAssistant.__new__(voice_assistant.VoiceAssistant)
     va._settings_path = tmp_path / "settings.json"
+    va.recording_beeps = True
     va.current_device = None
     va.preferred_input_name = None
     va.preferred_output_name = None

@@ -31,6 +31,7 @@ def test_save_then_load_round_trips(tmp_path):
         speed=1.25,
         paste_with_shift=False,
         restore_clipboard=False,
+        recording_beeps=False,
     )
     tray_settings.save(original, path)
     assert tray_settings.load(path) == original
@@ -50,11 +51,12 @@ def test_load_non_object_json_returns_defaults(tmp_path):
 
 def test_load_wrong_shaped_fields_fall_back_to_defaults(tmp_path):
     path = tmp_path / "settings.json"
-    path.write_text(json.dumps({"speed": "fast", "paste_with_shift": "yes", "voice": 42, "restore_clipboard": 0}))
+    path.write_text(json.dumps({"speed": "fast", "paste_with_shift": "yes", "voice": 42, "restore_clipboard": 0, "recording_beeps": "off"}))
     settings = tray_settings.load(path)
     assert settings.speed is None
     assert settings.paste_with_shift is True
     assert settings.restore_clipboard is True
+    assert settings.recording_beeps is True
     assert settings.voice is None
 
 
