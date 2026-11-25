@@ -122,3 +122,20 @@ def test_tap_cancelled_by_unplugging():
     fw.on_event("event17", hk.KEY_RIGHTCTRL, 1)
     fw.on_device_lost("event17")
     assert fw.on_event("event17", hk.KEY_RIGHTCTRL, 0) is None
+
+
+def test_node_not_yet_readable_is_retried(monkeypatch):
+    # Right after hotplug the node is root-only until udev hands it to `input`.
+    helper = hk.Helper(listener=None, forwarder=_forwarder()[0])
+    monkeypatch.setattr(hk.os, "listdir", lambda _: ["event16"])
+    attempts = []
+
+    def fake_open(path, flags):
+        attempts.append(path)
+        raise PermissionError(hk.errno.EACCES, "Permission denied", path)
+
+    monkeypatch.setattr(hk.os, "open", fake_open)
+    helper.rescan()
+    helper.rescan()
+    assert len(attempts) == 2
+    assert "event16" not in helper.skipped

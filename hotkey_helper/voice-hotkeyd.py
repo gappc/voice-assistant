@@ -170,6 +170,7 @@ class Helper:
         self.devices = {}  # fd -> dev name ("event3")
         self.clients = set()
         self.skipped = set()  # nodes checked and found not to be keyboards
+        self.denied = set()  # nodes not readable yet (udev may still be setting the group)
 
     def rescan(self):
         try:
@@ -178,6 +179,7 @@ class Helper:
             log(f"cannot list {INPUT_DIR}: {e}")
             return
         self.skipped &= nodes  # a node number freed by unplugging may be reused
+        self.denied &= nodes
         known = set(self.devices.values())
         for node in sorted(nodes - known - self.skipped):
             self._try_open(node)
@@ -187,10 +189,18 @@ class Helper:
         try:
             fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC)
         except OSError as e:
+            if e.errno in (errno.EACCES, errno.EPERM):
+                # A freshly plugged node is root-only until udev sets its
+                # group: try again on the next rescan, logging only once.
+                if node not in self.denied:
+                    log(f"cannot open {path} yet: {e}")
+                    self.denied.add(node)
+                return
             if e.errno not in (errno.ENOENT, errno.ENODEV):
                 log(f"cannot open {path}: {e}")
             self.skipped.add(node)
             return
+        self.denied.discard(node)
         try:
             keyboard = is_keyboard(fd)
             name = device_name(fd)
